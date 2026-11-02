@@ -1,0 +1,32 @@
+using BuildingFex.Api.Iam.Domain.Repositories;
+using BuildingFex.Api.Incidents.Application.QueryServices;
+using BuildingFex.Api.Incidents.Domain.Model.Aggregates;
+using BuildingFex.Api.Incidents.Domain.Repositories;
+
+namespace BuildingFex.Api.Incidents.Application.Internal.QueryServices;
+
+public class IncidentQueryService(
+    IIncidentRepository incidentRepository,
+    IUserRepository userRepository) : IIncidentQueryService
+{
+    public async Task<IEnumerable<Incident>> ListByOwnerExternalIdAsync(
+        string? ownerAdminExternalId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(ownerAdminExternalId))
+            return (await incidentRepository.ListAsync(cancellationToken)).OrderByDescending(i => i.ReportedAt);
+
+        return await ListAsync(ownerAdminExternalId, null, null, cancellationToken);
+    }
+
+    public async Task<IEnumerable<Incident>> ListAsync(
+        string ownerAdminExternalId,
+        string? residentExternalId,
+        string? status,
+        CancellationToken cancellationToken = default)
+    {
+        var owner = await userRepository.FindByExternalIdAsync(ownerAdminExternalId, cancellationToken);
+        if (owner is null) return [];
+        return await incidentRepository.ListByOwnerAdminIdAsync(owner.Id, residentExternalId, status, cancellationToken);
+    }
+}
