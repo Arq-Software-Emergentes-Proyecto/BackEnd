@@ -1,0 +1,49 @@
+# Unit tests para los componentes serverless y de IA.
+# Corren en cada PR y en main antes de que "Deploy API to AWS" publique.
+
+name: Unit tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - 'BuildingFex.Api/**'
+      - 'BuildingFex.Api.Tests/**'
+      - '.github/workflows/tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore buildingfex-api.sln
+
+      - name: Test
+        run: dotnet test buildingfex-api.sln --no-restore -c Release --logger "trx;LogFileName=results.trx" --results-directory TestResults
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
