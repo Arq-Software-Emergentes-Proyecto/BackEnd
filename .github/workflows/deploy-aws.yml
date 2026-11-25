@@ -1,0 +1,195 @@
+# Deploy API to AWS via GitHub Actions using OIDC role federation.
+# Requiere en GitHub:
+#   - Variable: AWS_REGION (ej. us-east-2)
+#   - Secreto: AWS_DEPLOY_ROLE_ARN
+#   - Secretos de la app: DB_CONNECTION_STRING, JWT_SECRET (obligatorios);
+#     MP_ACCESS_TOKEN, MP_PUBLIC_KEY, MP_WEBHOOK_SECRET, FIREBASE_CREDENTIALS_JSON (opcionales)
+#   - Variables opcionales: FRONTEND_ORIGINS, FRONTEND_BASE_URL
+# Ver documentación completa en docs/DEPLOY-AWS.md.
+
+name: Deploy API to AWS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'BuildingFex.Api/**'
+      - 'template.yaml'
+      - '.github/workflows/deploy-aws.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-aws
+  cancel-in-progress: false
+
+env:
+  STACK_NAME: buildingfex-api
+  FRONTEND_ORIGINS: ${{ vars.FRONTEND_ORIGINS || 'https://fronted-seven-opal.vercel.app' }}
+  FRONTEND_BASE_URL: ${{ vars.FRONTEND_BASE_URL || 'https://fronted-seven-opal.vercel.app' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Show OIDC claims
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python3 -c "
+          import os, json, base64, urllib.request
+          token_url = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL')
+          bearer = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN')
+          if not token_url or not bearer:
+              print('OIDC token request URL or bearer not found')
+              exit(0)
+          req = urllib.request.Request(f'{token_url}&audience=sts.amazonaws.com', headers={'Authorization': f'bearer {bearer}'})
+          with urllib.request.urlopen(req) as resp:
+              data = json.loads(resp.read().decode('utf-8'))
+              token = data.get('value', '')
+          parts = token.split('.')
+          if len(parts) >= 2:
+              payload = parts[1]
+              payload += '=' * (-len(payload) % 4)
+              claims = json.loads(base64.urlsafe_b64decode(payload.encode('utf-8')).decode('utf-8'))
+              print('=== OIDC Claims for AWS Trust Policy ===')
+              for key in ['sub', 'aud', 'repository', 'ref', 'repository_owner']:
+                  print(f'{key}: {claims.get(key)}')
+          "
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Current API URL
+        id: current
+        run: |
+          api_url=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text 2>/dev/null || true)
+          if [ "$api_url" = "None" ]; then api_url=""; fi
+          echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        run: |
+          dotnet publish BuildingFex.Api -c Release -r linux-arm64 --self-contained false -p:PublishReadyToRun=true -o .aws-publish
+
+      # Los secretos van en appsettings.Local.json del paquete porque la organización de AWS bloquea SSM
+      # y las variables de entorno de Lambda no alcanzan para el JSON de Firebase.
+      - name: Write app settings
+        env:
+          DB_CONNECTION_STRING: ${{ secrets.DB_CONNECTION_STRING }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          MP_ACCESS_TOKEN: ${{ secrets.MP_ACCESS_TOKEN }}
+          MP_PUBLIC_KEY: ${{ secrets.MP_PUBLIC_KEY }}
+          MP_WEBHOOK_SECRET: ${{ secrets.MP_WEBHOOK_SECRET }}
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+        run: |
+          webhook_url=""
+          if [ -n "${{ steps.current.outputs.api_url }}" ]; then
+            webhook_url="${{ steps.current.outputs.api_url }}/api/v1/payments/webhook"
+          fi
+          python3 .github/scripts/lambda_settings.py .aws-publish "$webhook_url"
+
+      - name: Deploy stack
+        run: |
+          sam deploy \
+            --template-file template.yaml \
+            --stack-name "$STACK_NAME" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "FrontendOrigins=$FRONTEND_ORIGINS" \
+              "FrontendBaseUrl=$FRONTEND_BASE_URL"
+
+      - name: Read stack outputs
+        id: stack
+        run: |
+          set -euo pipefail
+          api_url=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          jobs_function=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='JobsFunctionName'].OutputValue" --output text)
+          echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
+          echo "jobs_function=$jobs_function" >> "$GITHUB_OUTPUT"
+
+      - name: Set Mercado Pago webhook (first deploy)
+        if: steps.current.outputs.api_url == ''
+        env:
+          DB_CONNECTION_STRING: ${{ secrets.DB_CONNECTION_STRING }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          MP_ACCESS_TOKEN: ${{ secrets.MP_ACCESS_TOKEN }}
+          MP_PUBLIC_KEY: ${{ secrets.MP_PUBLIC_KEY }}
+          MP_WEBHOOK_SECRET: ${{ secrets.MP_WEBHOOK_SECRET }}
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+        run: |
+          webhook_url="${{ steps.stack.outputs.api_url }}/api/v1/payments/webhook"
+          python3 .github/scripts/lambda_settings.py .aws-publish "$webhook_url"
+          sam deploy \
+            --template-file template.yaml \
+            --stack-name "$STACK_NAME" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "FrontendOrigins=$FRONTEND_ORIGINS" \
+              "FrontendBaseUrl=$FRONTEND_BASE_URL"
+
+      - name: Migrate database
+        run: |
+          response_file=$(mktemp)
+          invoke_output=$(aws lambda invoke \
+            --function-name "${{ steps.stack.outputs.jobs_function }}" \
+            --cli-binary-format raw-in-base64-out \
+            --payload '{"job":"migrate"}' \
+            --cli-read-timeout 900 \
+            "$response_file" 2>&1)
+          echo "Lambda invoke response:"
+          cat "$response_file"
+          echo ""
+          func_error=$(echo "$invoke_output" | grep -o '"FunctionError": *"[^"]*"' || true)
+          if [ -n "$func_error" ] && [ "$func_error" != 'None' ]; then
+            echo "::error::La migración falló (ver respuesta arriba y CloudWatch)"
+            exit 1
+          fi
+
+      - name: Health check
+        run: |
+          api_url="${{ steps.stack.outputs.api_url }}"
+          success=0
+          for i in {1..5}; do
+            echo "Health check attempt $i of 5..."
+            if curl -fsS "$api_url/health"; then
+              echo "API is healthy!"
+              success=1
+              break
+            fi
+            sleep 5
+          done
+          if [ $success -ne 1 ]; then
+            echo "Health check failed after 5 attempts"
+            exit 1
+          fi
+          echo "### API desplegada: $api_url" >> "$GITHUB_STEP_SUMMARY"
