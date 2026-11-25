@@ -15,7 +15,7 @@ public class LambdaAiContextIndexingQueue(
     public async ValueTask EnqueueAsync(string uploadExternalId, CancellationToken ct = default)
     {
         var clean = (uploadExternalId ?? string.Empty).Trim();
-        var functionName = Environment.GetEnvironmentVariable(LambdaHosting.JobsFunctionVariable)?.Trim();
+        var functionName = System.Environment.GetEnvironmentVariable(LambdaHosting.JobsFunctionVariable)?.Trim();
         if (string.IsNullOrEmpty(clean) || string.IsNullOrEmpty(functionName))
             return;
 
