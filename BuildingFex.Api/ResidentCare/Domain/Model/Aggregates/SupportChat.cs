@@ -150,15 +150,10 @@ public class SupportChat
         string? citedSource = null)
         => SupportMessage.Create(this, authorRole, body, authorName, citedDocumentId, citedSource);
 
-    public SupportMessage AddMessage(
-        Sender sender,
-        string body,
-        string? authorName = null,
-        string? citedDocumentId = null,
-        string? citedSource = null)
-        => AddMessage(SenderRoles.ToAuthorRole(sender, Kind), body, authorName, citedDocumentId, citedSource);
+    public SupportMessage AddMessage(Sender sender, string body, string? authorName = null)
+        => AddMessage(SenderRoles.ToAuthorRole(sender, Kind), body, authorName);
 
-    /// <summary>Copia un mensaje de otro chat (transcript de la derivación) conservando la fecha.</summary>
+    /// <summary>Copia un mensaje de otro chat (transcript de la derivación) conservando fecha y cita.</summary>
     public SupportMessage CopyMessage(SupportMessage source)
     {
         var sender = source.GetSender();

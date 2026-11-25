@@ -1,223 +1,372 @@
-using System.Net;
-using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using BuildingFex.Api.ResidentCare.Infrastructure.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace BuildingFex.Api.ResidentCare.Infrastructure.Gemini;
 
-/// <summary>Un turno de la conversación. Role: "resident"/"user" → user; el resto → model.</summary>
-public record GeminiTurn(string Role, string Body);
+public sealed record GeminiTurn(string Role, string Body);
 
 public interface IGeminiClient
 {
-    Task<string> GenerateReplyAsync(IReadOnlyList<GeminiTurn> history, string systemInstruction, CancellationToken ct = default);
-    Task<string> SummarizeTitleAsync(IReadOnlyList<GeminiTurn> history, string locale, CancellationToken ct = default);
+    Task<string> GenerateReplyAsync(
+        IReadOnlyList<GeminiTurn> history,
+        string systemInstruction,
+        CancellationToken ct = default);
+
+    Task<string> SummarizeTitleAsync(
+        IReadOnlyList<GeminiTurn> history,
+        string locale,
+        CancellationToken ct = default);
 }
 
-/// <summary>Error del cliente con código estable para que el controller responda sin guardar el mensaje.</summary>
-public class GeminiException(string code, string message) : Exception(message)
-{
-    public const string ApiKeyMissing = "GEMINI_API_KEY_MISSING";
-    public const string EmptyPrompt = "GEMINI_EMPTY_PROMPT";
-    public const string Unavailable = "GEMINI_UNAVAILABLE";
-    public const string Timeout = "GEMINI_TIMEOUT";
-    public const string RequestFailed = "GEMINI_REQUEST_FAILED";
-    public const string EmptyReply = "GEMINI_EMPTY_REPLY";
-    public const string Busy = "GEMINI_BUSY";
-
-    public string Code { get; } = code;
-
-    /// <summary>true = el cliente puede reintentar luego sin duplicar nada.</summary>
-    public bool IsTransient => Code is Timeout or Unavailable or Busy or RequestFailed or EmptyReply;
-}
-
-/// <summary>Circuit breaker estático (QAS05): se abre tras N fallos seguidos y falla rápido.</summary>
-public static class GeminiCircuitBreaker
-{
-    private static readonly object Gate = new();
-    private static int _failures;
-    private static DateTime _openUntilUtc = DateTime.MinValue;
-
-    public static bool IsOpen
-    {
-        get { lock (Gate) return DateTime.UtcNow < _openUntilUtc; }
-    }
-
-    public static void RecordSuccess()
-    {
-        lock (Gate) { _failures = 0; _openUntilUtc = DateTime.MinValue; }
-    }
-
-    public static void RecordFailure(int threshold, int openSeconds)
-    {
-        lock (Gate)
-        {
-            if (++_failures < Math.Max(1, threshold)) return;
-            _openUntilUtc = DateTime.UtcNow.AddSeconds(Math.Max(1, openSeconds));
-            _failures = 0;
-        }
-    }
-}
-
+/// <summary>
+/// Adaptador (ACL) hacia Gemini. QAS05: timeout corto por llamada, un reintento con backoff ante
+/// saturación y circuit breaker; todo error sale como <see cref="GeminiException"/> con un código estable.
+/// </summary>
 public class GeminiClient(
     HttpClient http,
     IOptions<GeminiSettings> options,
     ILogger<GeminiClient> logger) : IGeminiClient
 {
-    private const string BaseUrl = "https://generativelanguage.googleapis.com/v1beta/models/";
-    // Modelo que ya respondió bien (tras un fallback); se comparte entre instancias.
-    private static string? _workingModel;
+    private static string? _resolvedModel;
 
-    private readonly GeminiSettings _settings = options.Value;
+    public Task<string> GenerateReplyAsync(
+        IReadOnlyList<GeminiTurn> history,
+        string systemInstruction,
+        CancellationToken ct = default) =>
+        GenerateAsync(history, systemInstruction, countsForBreaker: true, ct);
 
-    public Task<string> GenerateReplyAsync(IReadOnlyList<GeminiTurn> history, string systemInstruction, CancellationToken ct = default)
-        => CallAsync(history, systemInstruction, accessory: false, ct);
-
-    public async Task<string> SummarizeTitleAsync(IReadOnlyList<GeminiTurn> history, string locale, CancellationToken ct = default)
+    /// <param name="countsForBreaker">
+    /// false para llamadas accesorias (título del chat): sus fallos no abren el circuit breaker de las respuestas
+    /// al residente, y no se intentan mientras el circuito esté abierto o con fallos recientes.
+    /// </param>
+    private async Task<string> GenerateAsync(
+        IReadOnlyList<GeminiTurn> history,
+        string systemInstruction,
+        bool countsForBreaker,
+        CancellationToken ct)
     {
-        // Accesoria: si el circuito está abierto no se intenta.
-        if (GeminiCircuitBreaker.IsOpen)
-            throw new GeminiException(GeminiException.Busy, "Gemini circuit is open.");
-        var lang = locale.StartsWith("en", StringComparison.OrdinalIgnoreCase) ? "English" : "Spanish";
-        var instruction = $"Write a title of at most 6 words in {lang} that summarizes this conversation. Reply with the title only, no quotes.";
-        return (await CallAsync(history, instruction, accessory: true, ct)).Trim().Trim('"');
-    }
+        var settings = options.Value;
+        var apiKey = settings.ApiKey?.Trim() ?? string.Empty;
+        if (string.IsNullOrEmpty(apiKey))
+            throw new GeminiException("GEMINI_API_KEY_MISSING", "Gemini API key is not configured on the server.");
 
-    private async Task<string> CallAsync(IReadOnlyList<GeminiTurn> history, string systemInstruction, bool accessory, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(_settings.ApiKey))
-            throw new GeminiException(GeminiException.ApiKeyMissing, "Gemini API key is not configured.");
-        if (history.Count == 0 || history.All(t => string.IsNullOrWhiteSpace(t.Body)))
-            throw new GeminiException(GeminiException.EmptyPrompt, "Prompt is empty.");
-        if (GeminiCircuitBreaker.IsOpen)
-            throw new GeminiException(GeminiException.Busy, "Gemini circuit is open.");
+        var contents = ToContents(history);
+        if (contents.Count == 0)
+            throw new GeminiException("GEMINI_EMPTY_PROMPT", "Message is required.");
 
-        var payload = BuildPayload(history, systemInstruction);
-        var models = new List<string>();
-        if (_workingModel is { } known) models.Add(known);
-        models.Add(_settings.Model);
-        models.AddRange(_settings.FallbackModels);
+        if (GeminiCircuitBreaker.IsOpen(out var retryAfter))
+            throw new GeminiException("GEMINI_UNAVAILABLE", $"Gemini circuit open; retry in {retryAfter.TotalSeconds:F0}s.");
+        if (!countsForBreaker && GeminiCircuitBreaker.HasRecentFailures)
+            throw new GeminiException("GEMINI_UNAVAILABLE", "Gemini is degraded; optional call skipped.");
 
-        GeminiException? last = null;
-        foreach (var model in models.Distinct())
+        void RecordFailure()
         {
-            try
-            {
-                var reply = await SendWithRetryAsync(model, payload, ct);
-                _workingModel = model;
-                GeminiCircuitBreaker.RecordSuccess();
-                return reply;
-            }
-            catch (GeminiException ex) when (ex.Code == GeminiException.Unavailable && ex.Message == "model-not-found")
-            {
-                // 404: probar el siguiente modelo.
-                last = ex;
-            }
-            catch (GeminiException ex)
-            {
-                if (!accessory && ex.Code is GeminiException.Timeout or GeminiException.Unavailable)
-                    GeminiCircuitBreaker.RecordFailure(_settings.CircuitBreakerFailures, _settings.CircuitBreakerOpenSeconds);
-                throw;
-            }
+            if (countsForBreaker) GeminiCircuitBreaker.RecordFailure(settings);
         }
 
-        if (!accessory)
-            GeminiCircuitBreaker.RecordFailure(_settings.CircuitBreakerFailures, _settings.CircuitBreakerOpenSeconds);
-        throw new GeminiException(GeminiException.Unavailable, last?.Message ?? "No Gemini model available.");
-    }
+        var candidates = BuildModelCandidates();
+        string? lastMessage = null;
+        var lastBusy = false;
+        var busyAttempts = 0;
+        var timeout = TimeSpan.FromSeconds(Math.Clamp(settings.TimeoutSeconds, 1, 120));
+        var maxTokens = Math.Clamp(settings.MaxOutputTokens, 64, 8192);
 
-    private JsonObject BuildPayload(IReadOnlyList<GeminiTurn> history, string systemInstruction)
-    {
-        var contents = new JsonArray();
-        foreach (var turn in history.Where(t => !string.IsNullOrWhiteSpace(t.Body)))
+        foreach (var modelId in candidates)
         {
-            var isUser = turn.Role is "resident" or "user";
-            contents.Add(new JsonObject
+            for (var attempt = 0; attempt < 2; attempt++)
             {
-                ["role"] = isUser ? "user" : "model",
-                ["parts"] = new JsonArray(new JsonObject { ["text"] = turn.Body }),
-            });
-        }
-
-        return new JsonObject
-        {
-            ["contents"] = contents,
-            ["systemInstruction"] = new JsonObject
-            {
-                ["parts"] = new JsonArray(new JsonObject { ["text"] = systemInstruction }),
-            },
-            ["generationConfig"] = new JsonObject
-            {
-                ["temperature"] = 0.2,
-                ["maxOutputTokens"] = _settings.MaxOutputTokens,
-            },
-        };
-    }
-
-    // 1 reintento (~400 ms) ante 429/503.
-    private async Task<string> SendWithRetryAsync(string model, JsonObject payload, CancellationToken ct)
-    {
-        for (var attempt = 0; ; attempt++)
-        {
-            var (status, body) = await PostAsync(model, payload, ct);
-            if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
-            {
-                if (attempt == 0)
+                (bool Ok, int Status, JsonElement Payload, string? ErrorMessage) result;
+                try
                 {
-                    await Task.Delay(400, ct);
-                    continue;
+                    result = await RequestAsync(apiKey, modelId, contents, systemInstruction, 0.2, maxTokens, timeout, ct);
                 }
-                throw new GeminiException(status == HttpStatusCode.TooManyRequests ? GeminiException.Busy : GeminiException.Unavailable,
-                    $"Gemini returned {(int)status}.");
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    logger.LogWarning("Gemini {Model} timed out after {Timeout}s", modelId, timeout.TotalSeconds);
+                    RecordFailure();
+                    throw new GeminiException("GEMINI_TIMEOUT", "Gemini did not answer in time.");
+                }
+                catch (HttpRequestException ex)
+                {
+                    logger.LogWarning(ex, "Gemini {Model} network error", modelId);
+                    RecordFailure();
+                    throw new GeminiException("GEMINI_UNAVAILABLE", "Gemini is unreachable.");
+                }
+                catch (JsonException ex)
+                {
+                    logger.LogWarning(ex, "Gemini {Model} returned invalid JSON", modelId);
+                    RecordFailure();
+                    throw new GeminiException("GEMINI_REQUEST_FAILED", "Gemini returned an invalid response.");
+                }
+
+                var (ok, status, payload, errorMessage) = result;
+                if (ok)
+                {
+                    var text = ReadReply(payload);
+                    if (string.IsNullOrWhiteSpace(text))
+                        throw new GeminiException("GEMINI_EMPTY_REPLY", "Gemini returned an empty reply.");
+                    _resolvedModel = modelId;
+                    GeminiCircuitBreaker.RecordSuccess();
+                    return text;
+                }
+
+                lastMessage = errorMessage;
+                if (IsUnavailable(status, errorMessage)) break;
+                if (IsBusy(status, errorMessage))
+                {
+                    lastBusy = true;
+                    // Presupuesto de reintentos (QAS05): como máximo 3 llamadas saturadas en total.
+                    if (++busyAttempts >= 3) goto Exhausted;
+                    if (string.Equals(_resolvedModel, modelId, StringComparison.OrdinalIgnoreCase))
+                        _resolvedModel = null;
+                    if (attempt == 0)
+                    {
+                        await Task.Delay(400, ct);
+                        continue;
+                    }
+
+                    break;
+                }
+
+                if (status >= 500) RecordFailure();
+                throw new GeminiException("GEMINI_REQUEST_FAILED", errorMessage ?? $"HTTP {status}");
             }
-            if (status == HttpStatusCode.NotFound)
-                throw new GeminiException(GeminiException.Unavailable, "model-not-found");
-            if ((int)status >= 500)
-                throw new GeminiException(GeminiException.Unavailable, $"Gemini returned {(int)status}.");
-            if (!((int)status is >= 200 and < 300))
-            {
-                logger.LogWarning("Gemini {Model} rejected the request with {Status}.", model, (int)status);
-                throw new GeminiException(GeminiException.RequestFailed, $"Gemini returned {(int)status}.");
-            }
-            return ExtractText(body);
         }
+
+        Exhausted:
+        RecordFailure();
+        throw new GeminiException(
+            lastBusy ? "GEMINI_BUSY" : "GEMINI_REQUEST_FAILED",
+            lastMessage ?? "Gemini request failed.");
     }
 
-    private async Task<(HttpStatusCode Status, string Body)> PostAsync(string model, JsonObject payload, CancellationToken ct)
+    public async Task<string> SummarizeTitleAsync(
+        IReadOnlyList<GeminiTurn> history,
+        string locale,
+        CancellationToken ct = default)
     {
-        var timeout = TimeSpan.FromSeconds(Math.Clamp(_settings.TimeoutSeconds, 1, 120));
+        var snippet = string.Join(
+            '\n',
+            history
+                .Where(m => !string.IsNullOrWhiteSpace(m.Body))
+                .Take(8)
+                .Select(m =>
+                    $"{(m.Role is "user" or "resident" ? "Resident" : "Assistant")}: {m.Body.Trim()}"));
+
+        if (string.IsNullOrWhiteSpace(snippet))
+            return string.Empty;
+
+        var language = string.Equals(locale, "en", StringComparison.OrdinalIgnoreCase) ? "English" : "Spanish";
+        var text = await GenerateAsync(
+            [new GeminiTurn("user",
+                $"Write a 3-6 word title summarizing this resident support chat. Language: {language}. Title only, no quotes.\n\n{snippet}")],
+            "You only output a short chat title. No extra text.",
+            countsForBreaker: false,
+            ct);
+
+        return CleanTitle(text);
+    }
+
+    private List<string> BuildModelCandidates()
+    {
+        var settings = options.Value;
+        var list = new List<string>();
+        void Add(string? id)
+        {
+            var clean = (id ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(clean)) return;
+            if (list.Contains(clean, StringComparer.OrdinalIgnoreCase)) return;
+            list.Add(clean);
+        }
+
+        Add(_resolvedModel);
+        Add(settings.Model);
+        foreach (var m in settings.FallbackModels ?? []) Add(m);
+        return list;
+    }
+
+    private async Task<(bool Ok, int Status, JsonElement Payload, string? ErrorMessage)> RequestAsync(
+        string apiKey,
+        string modelId,
+        List<object> contents,
+        string systemInstruction,
+        double temperature,
+        int maxTokens,
+        TimeSpan timeout,
+        CancellationToken ct)
+    {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
-        try
+        ct = cts.Token;
+
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"https://generativelanguage.googleapis.com/v1beta/models/{Uri.EscapeDataString(modelId)}:generateContent?key={Uri.EscapeDataString(apiKey)}");
+
+        request.Content = new StringContent(
+            JsonSerializer.Serialize(new
+            {
+                systemInstruction = new { parts = new[] { new { text = systemInstruction } } },
+                contents,
+                generationConfig = new { temperature, maxOutputTokens = maxTokens },
+            }),
+            Encoding.UTF8,
+            "application/json");
+
+        using var response = await http.SendAsync(request, ct);
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+        var root = doc.RootElement.Clone();
+
+        if (response.IsSuccessStatusCode)
+            return (true, (int)response.StatusCode, root, null);
+
+        var message = root.TryGetProperty("error", out var err) && err.TryGetProperty("message", out var msg)
+            ? msg.GetString()
+            : $"HTTP {(int)response.StatusCode}";
+
+        logger.LogWarning("Gemini {Model} failed: {Status} {Message}", modelId, (int)response.StatusCode, message);
+        return (false, (int)response.StatusCode, root, message);
+    }
+
+    private static List<object> ToContents(IReadOnlyList<GeminiTurn> history)
+    {
+        var contents = history
+            .Where(m => !string.IsNullOrWhiteSpace(m.Body))
+            .Select(m => (object)new
+            {
+                role = m.Role is "user" or "resident" ? "user" : "model",
+                parts = new[] { new { text = m.Body.Trim() } },
+            })
+            .ToList();
+
+        if (contents.Count > 0)
         {
-            var url = $"{BaseUrl}{Uri.EscapeDataString(model)}:generateContent?key={Uri.EscapeDataString(_settings.ApiKey)}";
-            using var response = await http.PostAsJsonAsync(url, payload, cts.Token);
-            return (response.StatusCode, await response.Content.ReadAsStringAsync(cts.Token));
+            var first = JsonSerializer.Serialize(contents[0]);
+            if (first.Contains("\"role\":\"model\""))
+            {
+                contents.Insert(0, new
+                {
+                    role = "user",
+                    parts = new[] { new { text = "Hola" } },
+                });
+            }
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+
+        return contents;
+    }
+
+    private static string ReadReply(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
+            return string.Empty;
+
+        var first = candidates[0];
+        if (!first.TryGetProperty("content", out var content) || !content.TryGetProperty("parts", out var parts))
+            return string.Empty;
+
+        var sb = new StringBuilder();
+        foreach (var part in parts.EnumerateArray())
         {
-            throw new GeminiException(GeminiException.Timeout, "Gemini request timed out.");
+            if (part.TryGetProperty("text", out var text))
+                sb.Append(text.GetString());
         }
-        catch (HttpRequestException ex)
+
+        return sb.ToString().Trim();
+    }
+
+    private static bool IsUnavailable(int status, string? message)
+    {
+        var text = (message ?? string.Empty).ToLowerInvariant();
+        return status == 404
+               || text.Contains("not found")
+               || text.Contains("no longer available")
+               || text.Contains("not supported for generatecontent");
+    }
+
+    private static bool IsBusy(int status, string? message)
+    {
+        var text = (message ?? string.Empty).ToLowerInvariant();
+        return status is 429 or 503
+               || text.Contains("high demand")
+               || text.Contains("unavailable")
+               || text.Contains("resource exhausted")
+               || text.Contains("try again later");
+    }
+
+    private static string CleanTitle(string text)
+    {
+        var line = text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? string.Empty;
+        if (string.IsNullOrEmpty(line)) return string.Empty;
+        return line
+            .Trim('"', '\'', '«', '»')
+            .TrimEnd('.', '!', '?')
+            .Trim()
+            .SliceSafe(48);
+    }
+}
+
+file static class StringSliceExt
+{
+    public static string SliceSafe(this string value, int max)
+        => value.Length <= max ? value : value[..max];
+}
+
+public class GeminiException(string code, string message) : Exception(message)
+{
+    public string Code { get; } = code;
+
+    /// <summary>Fallas del proveedor (no de configuración) que el cliente puede reintentar.</summary>
+    public bool IsTransient => Code is "GEMINI_TIMEOUT" or "GEMINI_UNAVAILABLE" or "GEMINI_BUSY" or "GEMINI_REQUEST_FAILED" or "GEMINI_EMPTY_REPLY";
+}
+
+/// <summary>Circuit breaker de proceso para Gemini (QAS05: sin caídas en cascada).</summary>
+public static class GeminiCircuitBreaker
+{
+    private static readonly object Gate = new();
+    private static int _failures;
+    private static DateTimeOffset _openUntil = DateTimeOffset.MinValue;
+
+    public static bool IsOpen(out TimeSpan retryAfter)
+    {
+        lock (Gate)
         {
-            logger.LogWarning(ex, "Gemini request failed.");
-            throw new GeminiException(GeminiException.RequestFailed, "Gemini request failed.");
+            var now = DateTimeOffset.UtcNow;
+            retryAfter = _openUntil > now ? _openUntil - now : TimeSpan.Zero;
+            return _openUntil > now;
         }
     }
 
-    private static string ExtractText(string body)
+    /// <summary>Hay fallos acumulados sin un éxito posterior (el circuito podría abrirse pronto).</summary>
+    public static bool HasRecentFailures
     {
-        try
+        get
         {
-            var parts = JsonNode.Parse(body)?["candidates"]?[0]?["content"]?["parts"]?.AsArray();
-            var text = string.Concat(parts?.Select(p => p?["text"]?.GetValue<string>()) ?? []);
-            if (!string.IsNullOrWhiteSpace(text)) return text.Trim();
+            lock (Gate) return _failures > 0;
         }
-        catch (JsonException)
+    }
+
+    public static void RecordFailure(GeminiSettings settings)
+    {
+        lock (Gate)
         {
+            _failures++;
+            if (_failures >= Math.Max(1, settings.CircuitBreakerFailures))
+            {
+                _openUntil = DateTimeOffset.UtcNow.AddSeconds(Math.Max(1, settings.CircuitBreakerOpenSeconds));
+                _failures = 0;
+            }
         }
-        throw new GeminiException(GeminiException.EmptyReply, "Gemini returned an empty reply.");
+    }
+
+    public static void RecordSuccess()
+    {
+        lock (Gate)
+        {
+            _failures = 0;
+            _openUntil = DateTimeOffset.MinValue;
+        }
     }
 }

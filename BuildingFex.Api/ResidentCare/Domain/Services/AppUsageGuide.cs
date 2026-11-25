@@ -2,104 +2,106 @@ using BuildingFex.Api.ResidentCare.Domain.Model.ValueObjects;
 
 namespace BuildingFex.Api.ResidentCare.Domain.Services;
 
-/// <summary>Guía fija del producto BuildingFex; también se cita como fuente en las respuestas.</summary>
+/// <summary>
+/// Guía de uso de BuildingFex (documento fijo del producto). Junto con los documentos vigentes
+/// del edificio es la única base documental del asistente: se recupera por palabra clave y se cita
+/// como fuente igual que un reglamento o un acta.
+/// </summary>
 public static class AppUsageGuide
 {
     public const string DocumentIdPrefix = "app-guide:";
     public const string FileNameEs = "Guía de uso de BuildingFex";
     public const string FileNameEn = "BuildingFex user guide";
 
-    private sealed record GuideSection(string Id, string[] Keywords, string Content);
+    private sealed record Section(string Id, string[] Keywords, string Content);
 
-    private static readonly IReadOnlyList<GuideSection> Sections =
+    private static readonly Section[] Sections =
     [
-        new(
-            "finanzas",
-            [
-                "finanzas", "cuota", "cuotas", "pago", "pagar", "recibo", "recibos", "estado de cuenta",
-                "saldo", "deuda", "mora", "mercado pago", "mercadopago",
-                "finance", "finances", "fee", "fees", "pay", "payment", "payments", "receipt", "receipts", "balance", "debt", "statement",
-            ],
-            "En la sección Finanzas puedes revisar tu estado de cuenta, tus cuotas pendientes y tus recibos emitidos. Para pagar una cuota selecciona los conceptos pendientes y continúa con Mercado Pago. El asistente no tiene acceso a tus saldos ni pagos individuales, así que verifica los montos directamente en Finanzas."),
-        new(
-            "servicios",
-            [
-                "servicio", "servicios", "reserva", "reservar", "reservas", "area comun", "areas comunes",
-                "aforo", "cancelar", "cancelacion", "piscina", "salon", "parrilla", "gimnasio",
-                "service", "services", "reserve", "reservation", "reservations", "book", "booking", "common area", "amenity", "amenities", "capacity", "cancel",
-            ],
-            "En Servicios puedes consultar las áreas comunes disponibles y crear una reserva eligiendo fecha y horario. El sistema evita traslapes de horarios y controla que no se exceda el aforo permitido. Si necesitas cancelar una reserva confirmada, puedes hacerlo desde el listado de tus reservas."),
-        new(
-            "generacion",
-            [
-                "qr", "invitado", "invitados", "visita", "visitas", "pase", "pases", "codigo", "acceso", "generacion",
-                "guest", "guests", "visitor", "visitors", "pass", "passes", "code", "access",
-            ],
-            "Para generar un pase QR para invitados ingresa a la sección de generación de pases o reservas con invitados, registra los datos de la visita y comparte el código QR generado. El pase tiene vigencia temporal para validar el ingreso en portería."),
-        new(
-            "incidencias",
-            [
-                "incidencia", "incidencias", "reportar", "reporte", "nueva incidencia", "fuga", "averia",
-                "dano", "urgencia", "foto", "reclamo", "problema",
-                "incident", "incidents", "report", "leak", "damage", "urgency", "photo", "issue", "maintenance",
-            ],
-            "Para reportar un problema entra a Incidencias y selecciona Nueva incidencia. Indica qué está ocurriendo, dónde se ubica, desde cuándo sucede, el nivel de urgencia y adjunta una foto si ayuda a identificarlo. Desde la misma pantalla puedes seguir el estado del reporte hasta su resolución."),
-        new(
-            "comunicados",
-            [
-                "comunicado", "comunicados", "aviso", "avisos", "anuncio", "anuncios", "dashboard", "noticias",
-                "announcement", "announcements", "notice", "notices", "news",
-            ],
-            "Los comunicados oficiales publicados por la administración o la junta aparecen en el Dashboard principal. Allí puedes consultar avisos vigentes ordenados por prioridad, como urgentes, importantes y normales."),
-        new(
-            "cuenta",
-            [
-                "cuenta", "perfil", "ingreso", "ingresar", "login", "google", "correo", "invitacion",
-                "contrasena", "clave", "settings", "configuracion", "idioma", "espanol", "ingles",
-                "account", "profile", "sign in", "email", "invite", "invitation", "password", "language",
-            ],
-            "Puedes ingresar a BuildingFex con Google o con tu correo y contraseña activando tu cuenta desde la invitación enviada por tu administración. En Settings puedes revisar tus datos de perfil y cambiar el idioma de la interfaz entre español e inglés."),
-        new(
-            "soporte",
-            [
-                "soporte", "ayuda", "faq", "preguntas frecuentes", "chat", "asistente", "administracion", "derivar",
-                "support", "help", "assistant", "administration", "escalate",
-            ],
-            "En Soporte cuentas con preguntas frecuentes (FAQ) y este chat con el asistente del edificio. Si tu consulta requiere atención humana o no existe base documental en el reglamento ni en las actas, la conversación puede derivarse a la administración."),
+        new("finanzas",
+        [
+            "pagar", "pago", "pagos", "cuota", "cuotas", "mantenimiento", "recibo", "recibos", "deuda", "saldo",
+            "estado de cuenta", "mercado pago", "tarjeta", "finanzas", "conciliacion", "comprobante", "morosidad",
+            "pay", "payment", "payments", "fee", "fees", "receipt", "receipts", "balance", "debt", "dues",
+        ],
+        "Finanzas (menú Finanzas): el residente ve su estado de cuenta, las cuotas pendientes y sus recibos. " +
+        "Para pagar: Finanzas → selecciona las cuotas pendientes → Pagar; el pago se procesa en Mercado Pago. " +
+        "Si Mercado Pago rechaza o cancelas el pago, la deuda se mantiene y puedes reintentar. " +
+        "Los recibos de cuotas pagadas se consultan y descargan en Finanzas. " +
+        "El asistente no puede ver, confirmar ni modificar saldos o pagos: el dato oficial está en Finanzas."),
+        new("servicios",
+        [
+            "reservar", "reserva", "reservas", "area comun", "areas comunes", "piscina", "parrilla", "gimnasio",
+            "salon", "sum", "cancha", "aforo", "cancelar reserva", "servicios", "disponibilidad",
+            "reserve", "reservation", "booking", "book", "common area", "common areas", "pool", "gym", "grill",
+        ],
+        "Servicios (menú Servicios): permite reservar áreas comunes. Servicios → elige el área → fecha y horario " +
+        "disponible → confirmar. El sistema no permite reservas que se traslapen ni que superen el aforo del área. " +
+        "Las reservas propias se ven y cancelan desde Servicios. Los horarios, costos y reglas de uso de cada área " +
+        "los fija el reglamento del edificio."),
+        new("generacion",
+        [
+            "invitado", "invitados", "visita", "visitas", "qr", "codigo qr", "generacion", "acceso", "ingreso",
+            "guest", "guests", "visitor", "visitors", "qr code", "invite",
+        ],
+        "Generación (menú Generación): genera un código QR para tus invitados (por ejemplo, de una reserva). " +
+        "Comparte el QR con el invitado; el personal del edificio lo valida al ingresar."),
+        new("incidencias",
+        [
+            "incidencia", "incidencias", "reportar", "reporte", "falla", "fallas", "fuga", "gotera", "averia",
+            "roto", "rota", "malogrado", "malograda", "no funciona", "ascensor", "luz", "agua", "desague", "ruido",
+            "dano", "danos", "problema", "reparacion", "arreglar", "humedad", "filtracion",
+            "issue", "incident", "report", "broken", "leak", "not working", "noise", "repair", "damage", "elevator",
+        ],
+        "Incidencias (menú Incidencias): para reportar un problema del edificio o de tu departamento: " +
+        "Incidencias → Nueva incidencia → describe qué ocurre, dónde (torre, piso, departamento o área común), " +
+        "desde cuándo y si es urgente o afecta a otros vecinos; adjunta una foto si puedes → Enviar. " +
+        "Puedes seguir el estado (abierta, en progreso, resuelta), el proveedor asignado y los comentarios. " +
+        "Datos mínimos para una incidencia útil: ubicación exacta, descripción del problema y nivel de urgencia."),
+        new("comunicados",
+        [
+            "comunicado", "comunicados", "aviso", "avisos", "anuncio", "anuncios", "dashboard", "inicio", "noticias",
+            "announcement", "announcements", "notice", "notices", "news",
+        ],
+        "Dashboard (menú Dashboard): muestra el resumen de tu estado de cuenta, tus próximas reservas y los " +
+        "comunicados vigentes que publica la administración del edificio."),
+        new("cuenta",
+        [
+            "cuenta", "contrasena", "perfil", "idioma", "configuracion", "ajustes", "settings", "sesion",
+            "iniciar sesion", "login", "google", "invitacion", "enlace", "correo",
+            "account", "password", "language", "profile", "sign in", "log in", "invitation", "link", "email",
+        ],
+        "Cuenta: los residentes ingresan con Google (o correo) desde el enlace de invitación que envía la " +
+        "administración; si el enlace venció, pide uno nuevo a la administración. En Settings puedes cambiar el " +
+        "idioma (español / inglés) y revisar tu perfil."),
+        new("soporte",
+        [
+            "soporte", "preguntas frecuentes", "faq", "contacto", "contactar", "derivar",
+            "support", "contact", "frequently asked questions",
+        ],
+        "Soporte (menú Soporte): preguntas frecuentes y este chat. El asistente responde con el reglamento y las " +
+        "actas vigentes del edificio; si no encuentra base documental o pides hablar con una persona, deriva la " +
+        "consulta a la junta o a la administración, que responde en el mismo chat."),
     ];
 
     public static string FileName(string locale) =>
         locale.StartsWith("en", StringComparison.OrdinalIgnoreCase) ? FileNameEn : FileNameEs;
 
+    /// <summary>Secciones cuya palabra clave aparece en la consulta (orden por número de coincidencias).</summary>
     public static IReadOnlyList<KnowledgeSource> Match(string query, string locale, int max = 2)
     {
-        if (max <= 0) return [];
-        var folded = SupportEscalate.Fold(query);
-        if (folded.Length == 0) return [];
+        var folded = " " + SupportEscalate.Fold(query) + " ";
+        if (folded.Trim().Length == 0) return [];
 
-        var padded = $" {folded} ";
-        var fileName = FileName(locale);
-
-        var matches = new List<(KnowledgeSource Source, int Hits)>();
-        foreach (var section in Sections)
-        {
-            var hits = 0;
-            foreach (var kw in section.Keywords)
-            {
-                if (padded.Contains($" {kw} ", StringComparison.Ordinal))
-                    hits++;
-            }
-
-            if (hits == 0) continue;
-
-            var score = Math.Min(1.0, 0.5 + 0.1 * hits);
-            matches.Add((new KnowledgeSource(DocumentIdPrefix + section.Id, fileName, section.Content, score), hits));
-        }
-
-        return matches
-            .OrderByDescending(m => m.Hits)
-            .Take(max)
-            .Select(m => m.Source)
+        return Sections
+            .Select(s => (Section: s, Hits: s.Keywords.Count(k => folded.Contains(" " + k + " ", StringComparison.Ordinal))))
+            .Where(x => x.Hits > 0)
+            .OrderByDescending(x => x.Hits)
+            .Take(Math.Max(1, max))
+            .Select(x => new KnowledgeSource(
+                DocumentIdPrefix + x.Section.Id,
+                FileName(locale),
+                x.Section.Content,
+                Math.Min(1.0, 0.5 + 0.1 * x.Hits)))
             .ToList();
     }
 }

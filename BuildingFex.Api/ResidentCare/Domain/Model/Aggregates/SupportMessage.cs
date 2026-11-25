@@ -13,9 +13,9 @@ public class SupportMessage
     public string AuthorRole { get; private set; } = string.Empty;
     public string Body { get; private set; } = string.Empty;
     public string? AuthorName { get; private set; }
-    /// <summary>ExternalId del documento citado (ImportUpload.ExternalId o "app-guide:…").</summary>
+    /// <summary>Documento citado por el asistente (ImportUpload.ExternalId o "app-guide:…").</summary>
     public string? CitedDocumentId { get; private set; }
-    /// <summary>Nombre del archivo o guía citado en la respuesta.</summary>
+    /// <summary>Nombre del archivo citado ("Fuente: …").</summary>
     public string? CitedSource { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
 
@@ -50,12 +50,12 @@ public class SupportMessage
         return msg;
     }
 
+    public ValueObjects.Sender? GetSender() => ValueObjects.SenderRoles.FromAuthorRole(AuthorRole);
+
     private static string? Clip(string? value, int max)
     {
         var clean = (value ?? string.Empty).Trim();
         if (clean.Length == 0) return null;
         return clean.Length <= max ? clean : clean[..max];
     }
-
-    public ValueObjects.Sender? GetSender() => ValueObjects.SenderRoles.FromAuthorRole(AuthorRole);
 }
