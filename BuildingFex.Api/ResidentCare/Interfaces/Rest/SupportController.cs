@@ -36,6 +36,7 @@ public class SupportController(
     ILogger<SupportController> logger) : TenantScopedControllerBase
 {
     private const int MaxMessageLength = 2000;
+    private const int MaxHistoryTurns = 20;
     private static readonly TimeSpan TitleSummaryBudget = TimeSpan.FromSeconds(3);
 
     [HttpGet("chats")]
@@ -393,7 +394,7 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
-        var history = new List<GeminiTurn> { new("user", body) };
+        var history = BuildHistory(chat, body);
         var prompt = BasicSystemPrompt(locale);
 
         string reply;
@@ -414,6 +415,24 @@ public class SupportController(
         await TrySummarizeTitleAsync(chat, actor, locale, ct);
         await db.SaveChangesAsync(ct);
         return await RespondAsync(chat, ct);
+    }
+
+    /// <summary>TS008: solo los mensajes de esta conversación (del mismo residente), últimos N turnos.</summary>
+    private static List<GeminiTurn> BuildHistory(SupportChat chat, string body)
+    {
+        var turns = chat.Messages
+            .Select(m => new { Message = m, Sender = SenderRoles.FromAuthorRole(m.AuthorRole) })
+            .Where(x => x.Sender is Sender.Resident or Sender.Assistant)
+            .OrderBy(x => x.Message.CreatedAt)
+            .ThenBy(x => x.Message.Id)
+            .TakeLast(MaxHistoryTurns)
+            .Select(x => new GeminiTurn(
+                x.Sender == Sender.Assistant ? SenderRoles.Assistant : SenderRoles.ResidentInAiChat,
+                x.Message.Body))
+            .ToList();
+
+        turns.Add(new GeminiTurn(SenderRoles.ResidentInAiChat, body));
+        return turns;
     }
 
     private IActionResult AssistantUnavailable(GeminiException ex, string locale)
