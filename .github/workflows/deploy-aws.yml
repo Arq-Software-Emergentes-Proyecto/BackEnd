@@ -3,7 +3,7 @@
 #   - Variable: AWS_REGION (ej. us-east-2)
 #   - Secreto: AWS_DEPLOY_ROLE_ARN
 #   - Secretos de la app: DB_CONNECTION_STRING, JWT_SECRET (obligatorios);
-#     MP_ACCESS_TOKEN, MP_PUBLIC_KEY, MP_WEBHOOK_SECRET, FIREBASE_CREDENTIALS_JSON (opcionales)
+#     MP_ACCESS_TOKEN, MP_PUBLIC_KEY, MP_WEBHOOK_SECRET, FIREBASE_CREDENTIALS_JSON, GEMINI_API_KEY (opcionales)
 #   - Variables opcionales: FRONTEND_ORIGINS, FRONTEND_BASE_URL
 # Ver documentación completa en docs/DEPLOY-AWS.md.
 
@@ -103,6 +103,7 @@ jobs:
           MP_PUBLIC_KEY: ${{ secrets.MP_PUBLIC_KEY }}
           MP_WEBHOOK_SECRET: ${{ secrets.MP_WEBHOOK_SECRET }}
           FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           webhook_url=""
           if [ -n "${{ steps.current.outputs.api_url }}" ]; then
@@ -143,6 +144,7 @@ jobs:
           MP_PUBLIC_KEY: ${{ secrets.MP_PUBLIC_KEY }}
           MP_WEBHOOK_SECRET: ${{ secrets.MP_WEBHOOK_SECRET }}
           FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           webhook_url="${{ steps.stack.outputs.api_url }}/api/v1/payments/webhook"
           python3 .github/scripts/lambda_settings.py .aws-publish "$webhook_url"

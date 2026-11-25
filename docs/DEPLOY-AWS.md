@@ -84,6 +84,7 @@ En el repositorio de GitHub (**Settings → Secrets and variables → Actions**)
   - `JWT_SECRET`: Clave simétrica de al menos 32 caracteres para el firmado de tokens de sesión. *(Obligatorio)*
   - `MP_ACCESS_TOKEN`, `MP_PUBLIC_KEY`, `MP_WEBHOOK_SECRET`: Credenciales de Mercado Pago. *(Opcionales)*
   - `FIREBASE_CREDENTIALS_JSON`: Contenido completo del archivo JSON de la clave de servicio de Firebase Admin SDK. *(Opcional)*
+  - `GEMINI_API_KEY`: Clave de Google AI Studio para el chat con IA. Sin ella la API arranca, pero el chat responde `GEMINI_API_KEY_MISSING`. *(Opcional)*
 
 ### 4. Firebase Auth
 - Verifica en la consola de Firebase que los proveedores **Google** y **Correo/contraseña** estén habilitados.

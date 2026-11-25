@@ -67,6 +67,12 @@ def main() -> int:
             "CredentialsJson": firebase_credentials,
         }
 
+    gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_api_key:
+        config["Gemini"] = {
+            "ApiKey": gemini_api_key,
+        }
+
     os.makedirs(publish_dir, exist_ok=True)
     target_path = os.path.join(publish_dir, "appsettings.Local.json")
 
