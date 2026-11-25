@@ -40,6 +40,7 @@ public class SupportController(
     IAiUsageQuota aiQuota,
     IPlanQuotaClient planQuota,
     IIncidentCommandService incidentCommands,
+    IncidentTriageService incidentTriage,
     ILogger<SupportController> logger) : TenantScopedControllerBase
 {
     private const int MaxMessageLength = 2000;
@@ -320,6 +321,9 @@ public class SupportController(
             return BadRequest(new { code = "INCIDENT_NOT_CREATED", message = created.Message });
 
         var incident = created.Value!;
+        if (incidentTriage.IsAvailableFor(actor.Caller.TenantAdmin))
+            await incidentTriage.SuggestAsync(incident.ExternalId, actor.Caller.TenantAdmin, ct, TimeSpan.FromSeconds(8));
+
         chat.LinkIncident(incident.ExternalId);
         chat.AddMessage(Sender.Assistant,
             $"Registré tu reporte como la incidencia «{incident.Title}». La administración ya la ve en su bandeja; el seguimiento continúa en Incidencias y aquí te avisaré cuando se resuelva.");

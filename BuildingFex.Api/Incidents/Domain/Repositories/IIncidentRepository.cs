@@ -17,5 +17,11 @@ public interface IIncidentRepository : IBaseRepository<Incident>
         string? status,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Abiertas, sin proveedor, sin escalar y reportadas antes de <paramref name="reportedBefore"/> (trackeadas).</summary>
+    Task<IReadOnlyList<Incident>> ListEscalationCandidatesAsync(
+        DateTimeOffset reportedBefore,
+        int limit,
+        CancellationToken cancellationToken = default);
+
     Task<bool> AnyIncidentsAsync(CancellationToken cancellationToken = default);
 }

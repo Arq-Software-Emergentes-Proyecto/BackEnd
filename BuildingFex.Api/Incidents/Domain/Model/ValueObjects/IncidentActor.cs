@@ -4,4 +4,7 @@ namespace BuildingFex.Api.Incidents.Domain.Model.ValueObjects;
 public sealed record IncidentActor(string? Id, string? Name, string? Role)
 {
     public static readonly IncidentActor System = new(null, null, "system");
+
+    /// <summary>Triaje con IA: solo sugiere categoría y prioridad.</summary>
+    public static readonly IncidentActor Assistant = new(null, "Asistente IA", "assistant");
 }

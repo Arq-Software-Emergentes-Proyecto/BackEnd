@@ -123,6 +123,7 @@ Jobs disponibles:
 - `migrate`: Aplica las migraciones de esquema EF Core y datos iniciales.
 - `monthly-billing`: Emisión y cálculo de cuotas de mantenimiento para todos los condominios.
 - `import-cleanup`: Eliminación de archivos temporales huérfanos que excedieron el TTL.
+- `incident-escalation`: Escalado (cada hora) de incidencias abiertas sin proveedor después de 48 h.
 - `ai-index`: Indexación RAG de documentos en Contexto IA (acepta `"uploadId"` opcional; sin él barre pendientes y embeddings obsoletos).
 
 ---

@@ -20,10 +20,28 @@ También expuestos en `/api/v1/incidents` (diseño táctico).
 | PATCH | `/incidents/{id}/assign` | admin; `{ providerId }` (vacío = desasignar); `open` → `in-progress` |
 | PATCH | `/incidents/{id}/resolve` | admin; `{ resolutionComment }` obligatorio → `RESOLUTION_COMMENT_REQUIRED` (400) |
 | POST | `/incidents/{id}/comments` | admin o residente que reportó; comentario de seguimiento |
+| POST | `/incidents/{id}/triage-suggestion` | admin; la IA sugiere `category` y `priority` (plan Standard+) → 403 `PLAN_FEATURE_NOT_INCLUDED`, 429 `AI_MONTHLY_CAP_REACHED`, 503 `AI_UNAVAILABLE` |
+| PATCH | `/incidents/{id}/triage` | admin; `{}` aplica la sugerencia, `{ category?, priority? }` la corrige → `TRIAGE_SUGGESTION_REQUIRED` (400) |
 | DELETE | `/incidents/{id}` | admin |
 
 Tiempo real: reutiliza `SupportHub` (`/hubs/support`). `incidentCreated` → grupo del admin;
 `incidentUpdated` → admin + residente que reportó.
+
+## Escalamiento (48 h)
+
+`EscalationPolicy`: una incidencia `open` sin proveedor asignado más de 48 h se escala una sola vez
+(`escalatedAt`, evento `escalated`, aviso `incidentUpdated` al admin). Lo ejecuta `IncidentEscalationJob`:
+en AWS el job `incident-escalation` de la función de jobs (EventBridge Scheduler, cada hora); en local
+`IncidentEscalationWorker` (`Incidents:Escalation:Enabled`, `IntervalMinutes`). La respuesta incluye
+`escalated` (escalada y todavía sin asignar) y `escalatedAt`.
+
+## Triaje con IA
+
+Módulo `aiIncidentClassification` (Standard, Scale, Portafolio). Al reportar una incidencia sin categoría o
+prioridad, la IA (Gemini, `GeminiIncidentTriageAdvisor`) sugiere ambas con una frase de justificación; la
+sugerencia se guarda aparte (`aiSuggestion`) y **no** cambia la incidencia hasta que el administrador la
+confirma. Cada sugerencia descuenta una consulta del tope mensual del edificio (CON11) y se devuelve si la IA
+falla. El residente no ve la sugerencia.
 
 ## Estados (persistidos → diseño táctico)
 
@@ -34,7 +52,8 @@ Tiempo real: reutiliza `SupportHub` (`/hubs/support`). `incidentCreated` → gru
 | `resolved` | RESOLVED |
 
 Prioridad opcional: `low` / `medium` / `high` / `critical`. Historial en `incident_events`
-(`reported`, `status_changed`, `assigned`, `unassigned`, `resolved`, `comment`).
+(`reported`, `status_changed`, `assigned`, `unassigned`, `resolved`, `comment`, `escalated`,
+`ai_triage_suggested`, `triage_confirmed`).
 
 ## Fase 3 — completado
 
@@ -49,4 +68,5 @@ Prioridad opcional: `low` / `medium` / `high` / `critical`. Historial en `incide
 
 - `id`, `ownerAdminId`, `residentId`, `residentName`, `title`, `description`, `status`, `createdAt`, `provider`
 - Nuevos: `providerId` (assigneeId → `service_providers.external_id`), `providerPhone`, `providerSpecialty`,
-  `category`, `priority`, `resolutionComment`, `resolvedAt`, `updatedAt`, `events` (solo en el detalle)
+  `category`, `priority`, `resolutionComment`, `resolvedAt`, `updatedAt`, `events` (solo en el detalle),
+  `escalated`, `escalatedAt`, `aiSuggestion { category, priority, reason, suggestedAt, pending }` (solo admin)

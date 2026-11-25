@@ -4,6 +4,8 @@ namespace BuildingFex.Api.Incidents.Interfaces.Rest.Resources;
 /// Incidencia (JSON compat json-server). provider = nombre (compat); providerId/Phone/Specialty
 /// salen del proveedor registrado para que el residente vea los datos del técnico (US031).
 /// events solo se incluye en GET /incidents/{id} (timeline, RNF010).
+/// escalated: sigue abierta y sin asignar después de 48 h (EscalationPolicy).
+/// aiSuggestion: triaje con IA pendiente o aplicado; solo para el administrador.
 /// </summary>
 public record IncidentResource(
     string Id,
@@ -23,7 +25,17 @@ public record IncidentResource(
     string? ResolvedAt,
     string? UpdatedAt,
     string OwnerAdminId,
-    IReadOnlyList<IncidentEventResource>? Events);
+    IReadOnlyList<IncidentEventResource>? Events,
+    string? EscalatedAt = null,
+    bool Escalated = false,
+    IncidentTriageSuggestionResource? AiSuggestion = null);
+
+public record IncidentTriageSuggestionResource(
+    string? Category,
+    string? Priority,
+    string? Reason,
+    string SuggestedAt,
+    bool Pending);
 
 public record IncidentEventResource(
     int Id,
@@ -69,3 +81,6 @@ public record AssignIncidentResource(string? ProviderId, string? Provider, strin
 public record ResolveIncidentResource(string? ResolutionComment, string? Comment);
 
 public record AddIncidentCommentResource(string? Comment);
+
+/// <summary>PATCH /incidents/{id}/triage: valores vacíos = aplicar la sugerencia de la IA.</summary>
+public record ConfirmIncidentTriageResource(string? Category, string? Priority);

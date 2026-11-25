@@ -198,6 +198,27 @@ public class IncidentCommandService(
         return await SaveAsync(incident, cancellationToken);
     }
 
+    /// <summary>El administrador confirma (o corrige) la categoría y prioridad sugeridas por la IA.</summary>
+    public async Task<Result<Incident>> Handle(
+        ConfirmIncidentTriageCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        var incident = await incidentRepository.FindByExternalIdAsync(command.ExternalId, cancellationToken);
+        if (incident is null)
+            return Result<Incident>.Failure(IncidentError.IncidentNotFound, "Incidencia no encontrada.");
+
+        try
+        {
+            incident.ConfirmTriage(command.Category, command.Priority, command.Actor);
+        }
+        catch (IncidentDomainException ex)
+        {
+            return Result<Incident>.Failure(ex.Error, ex.Message);
+        }
+
+        return await SaveAsync(incident, cancellationToken);
+    }
+
     public async Task<Result<Incident>> Handle(
         DeleteIncidentCommand command,
         CancellationToken cancellationToken = default)

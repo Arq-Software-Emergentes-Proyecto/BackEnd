@@ -16,6 +16,8 @@ public class Incident : IAuditableEntity
     public const int TitleMaxLength = 200;
     public const int DescriptionMaxLength = 2000;
     public const int CommentMaxLength = 2000;
+    public const int CategoryMaxLength = 50;
+    public const int TriageReasonMaxLength = 300;
 
     private readonly List<IncidentEvent> _events = [];
 
@@ -42,6 +44,15 @@ public class Incident : IAuditableEntity
     public string? ResolutionComment { get; private set; }
     public DateTimeOffset? ResolvedAt { get; private set; }
 
+    /// <summary>Momento en que <see cref="EscalationPolicy"/> la escaló por seguir sin asignar (48 h).</summary>
+    public DateTimeOffset? EscalatedAt { get; private set; }
+
+    /// <summary>Sugerencia de triaje de la IA (la confirma el administrador; no cambia Category/Priority).</summary>
+    public string? AiSuggestedCategory { get; private set; }
+    public string? AiSuggestedPriority { get; private set; }
+    public string? AiSuggestionReason { get; private set; }
+    public DateTimeOffset? AiSuggestedAt { get; private set; }
+
     /// <summary>Conversación de Resident Care desde la que se reportó (ReportarIncidente); recibe el aviso de resolución.</summary>
     public string? SourceChatId { get; private set; }
     public DateTimeOffset ReportedAt { get; private set; }
@@ -49,6 +60,16 @@ public class Incident : IAuditableEntity
     public DateTimeOffset? UpdatedAt { get; set; }
 
     public IReadOnlyCollection<IncidentEvent> Events => _events;
+
+    public bool IsUnassigned => AssigneeId is null && Provider is null;
+
+    /// <summary>Escalada y todavía pendiente: sigue abierta y sin proveedor.</summary>
+    public bool IsEscalationActive => EscalatedAt is not null && Status == IncidentStatuses.Open && IsUnassigned;
+
+    public bool HasPendingTriageSuggestion =>
+        AiSuggestedAt is not null
+        && (!string.Equals(AiSuggestedCategory, Category, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(AiSuggestedPriority, Priority, StringComparison.Ordinal));
 
     private Incident()
     {
@@ -226,10 +247,79 @@ public class Incident : IAuditableEntity
         return ev;
     }
 
+    /// <summary>
+    /// escalate(): la incidencia sigue reportada y sin asignar más allá del umbral de <see cref="EscalationPolicy"/>.
+    /// Idempotente: solo se escala una vez.
+    /// </summary>
+    public bool Escalate(DateTimeOffset now)
+    {
+        if (!EscalationPolicy.MustEscalate(this, now)) return false;
+
+        EscalatedAt = now;
+        _events.Add(IncidentEvent.Create(
+            IncidentEventTypes.Escalated,
+            Status,
+            $"Sin asignar por más de {EscalationPolicy.Threshold.TotalHours:0} horas: se avisó a la administración.",
+            IncidentActor.System,
+            now));
+        Touch();
+        return true;
+    }
+
     public void LinkSourceChat(string? chatExternalId)
     {
         if (string.IsNullOrWhiteSpace(chatExternalId)) return;
         SourceChatId = chatExternalId.Trim();
+    }
+
+    /// <summary>Guarda la sugerencia de categoría y prioridad de la IA (la IA solo sugiere).</summary>
+    public void RecordTriageSuggestion(string? category, string? priority, string? reason, DateTimeOffset now)
+    {
+        var cat = string.IsNullOrWhiteSpace(category) ? null : Clip(category, CategoryMaxLength);
+        var pri = IncidentPriorities.Normalize(priority);
+        if (cat is null && pri is null) return;
+
+        AiSuggestedCategory = cat;
+        AiSuggestedPriority = pri;
+        AiSuggestionReason = string.IsNullOrWhiteSpace(reason) ? null : Clip(reason, TriageReasonMaxLength);
+        AiSuggestedAt = now;
+        _events.Add(IncidentEvent.Create(
+            IncidentEventTypes.AiTriageSuggested,
+            Status,
+            TriageSummary(cat, pri),
+            IncidentActor.Assistant,
+            now));
+        Touch();
+    }
+
+    /// <summary>
+    /// El administrador confirma la clasificación. Sin valores explícitos se toma la sugerencia de la IA.
+    /// </summary>
+    public void ConfirmTriage(string? category, string? priority, IncidentActor actor)
+    {
+        var cat = string.IsNullOrWhiteSpace(category) ? AiSuggestedCategory : Clip(category, CategoryMaxLength);
+        var pri = IncidentPriorities.Normalize(priority) ?? AiSuggestedPriority;
+        if (cat is null && pri is null)
+            throw new IncidentDomainException(
+                IncidentError.TriageSuggestionRequired,
+                "No hay una sugerencia de triaje para confirmar.");
+
+        Category = cat ?? Category;
+        Priority = pri ?? Priority;
+        _events.Add(IncidentEvent.Create(
+            IncidentEventTypes.TriageConfirmed,
+            Status,
+            TriageSummary(Category, Priority),
+            actor));
+        Touch();
+    }
+
+    private static string TriageSummary(string? category, string? priority)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(category)) parts.Add($"Categoría: {category}");
+        if (!string.IsNullOrWhiteSpace(priority)) parts.Add($"Prioridad: {priority}");
+        return string.Join(" · ", parts);
     }
 
     private void Touch() => UpdatedAt = DateTimeOffset.UtcNow;

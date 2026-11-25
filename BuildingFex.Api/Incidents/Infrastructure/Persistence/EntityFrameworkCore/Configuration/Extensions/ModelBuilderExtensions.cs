@@ -25,7 +25,15 @@ public static class ModelBuilderExtensions
             entity.Property(i => i.AssigneeId).HasMaxLength(128);
             entity.Property(i => i.ResolutionComment).HasMaxLength(Incident.CommentMaxLength);
             entity.Property(i => i.ResolvedAt);
+            entity.Property(i => i.EscalatedAt);
+            entity.Property(i => i.AiSuggestedCategory).HasMaxLength(Incident.CategoryMaxLength);
+            entity.Property(i => i.AiSuggestedPriority).HasMaxLength(20);
+            entity.Property(i => i.AiSuggestionReason).HasMaxLength(Incident.TriageReasonMaxLength);
+            entity.Property(i => i.AiSuggestedAt);
             entity.Property(i => i.SourceChatId).HasMaxLength(128);
+            entity.Ignore(i => i.IsUnassigned);
+            entity.Ignore(i => i.IsEscalationActive);
+            entity.Ignore(i => i.HasPendingTriageSuggestion);
 
             entity.HasOne(i => i.OwnerAdmin)
                 .WithMany()
