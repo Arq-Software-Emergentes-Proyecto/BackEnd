@@ -366,6 +366,10 @@ public class SupportController(
         string locale,
         CancellationToken ct)
     {
+        // TS010: defensa en profundidad (además de CanAccess): solo el residente dueño habla con el asistente.
+        if (actor.IsAdmin || !string.Equals(chat.ResidentId, actor.ExternalId, StringComparison.Ordinal))
+            return ForbiddenTenant(actor.Caller, "chatId", chat.ExternalId);
+
         var askedAt = DateTimeOffset.UtcNow;
 
         // Ya derivado: la conversación sigue con la administración.
