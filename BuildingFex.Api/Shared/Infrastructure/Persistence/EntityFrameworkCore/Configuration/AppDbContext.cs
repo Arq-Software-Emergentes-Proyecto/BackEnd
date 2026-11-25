@@ -94,6 +94,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(u => u.FolderId).HasMaxLength(128);
             entity.Property(u => u.UploadStatus).HasMaxLength(32).IsRequired();
             entity.HasIndex(u => u.UploadStatus);
+            entity.Property(u => u.IndexingStatus).HasMaxLength(32).IsRequired();
+            entity.Property(u => u.IndexingError).HasMaxLength(1024);
+            entity.HasIndex(u => u.IndexingStatus);
             // OfficialDocument (Tabla 76): tipo, versión y vigencia. También en SchemaUpgrade.ApplyOfficialDocumentsAsync.
             entity.Property(u => u.DocumentType).HasMaxLength(20).IsRequired().HasDefaultValue(OfficialDocumentType.Other);
             entity.Property(u => u.Version).IsRequired().HasDefaultValue(1);
@@ -101,9 +104,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(u => u.DocumentStatus).HasMaxLength(20).IsRequired().HasDefaultValue(OfficialDocumentStatus.Published);
             entity.Property(u => u.SupersedesId).HasMaxLength(128);
             entity.HasIndex(u => new { u.OwnerAdminId, u.DocumentStatus }).HasDatabaseName("ix_import_uploads_owner_document_status");
-            entity.Property(u => u.IndexingStatus).HasMaxLength(32).IsRequired().HasDefaultValue(ImportIndexingStatus.None);
-            entity.HasIndex(u => u.IndexingStatus);
-            entity.Property(u => u.IndexingError).HasMaxLength(1024);
         });
 
         builder.Entity<ImportFolder>(entity =>
@@ -119,8 +119,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(f => f.IsContext);
         });
 
-        // ResidentCare: tope mensual de consultas IA por cuenta (CON11)
-        builder.Entity<AiUsage>(entity =>
+        // ResidentCare — tope mensual de consultas IA por edificio (CON11)
+        builder.Entity<BuildingFex.Api.ResidentCare.Domain.Model.Aggregates.AiUsage>(entity =>
         {
             entity.ToTable("ai_usages");
             entity.HasKey(u => u.Id);
@@ -132,19 +132,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.HasIndex(u => new { u.OwnerAdminId, u.Period }).IsUnique();
         });
 
-        builder.Entity<AiContextChunk>(entity =>
+        builder.Entity<BuildingFex.Api.ResidentCare.Domain.Model.Aggregates.AiContextChunk>(entity =>
         {
             entity.ToTable("ai_context_chunks");
             entity.HasKey(c => c.Id);
             entity.Property(c => c.Id).ValueGeneratedOnAdd();
             entity.Property(c => c.OwnerAdminId).HasMaxLength(128).IsRequired();
-            entity.HasIndex(c => c.OwnerAdminId).HasDatabaseName("ix_ai_context_chunks_owner");
+            entity.HasIndex(c => c.OwnerAdminId);
             entity.Property(c => c.UploadExternalId).HasMaxLength(128).IsRequired();
-            entity.HasIndex(c => c.UploadExternalId).HasDatabaseName("ix_ai_context_chunks_upload");
+            entity.HasIndex(c => c.UploadExternalId);
             entity.Property(c => c.FileName).HasMaxLength(512);
             entity.Property(c => c.Content).HasColumnType("LONGTEXT").IsRequired();
             entity.Property(c => c.EmbeddingJson).HasColumnType("LONGTEXT").IsRequired();
-            entity.Property(c => c.EmbeddingModel).HasMaxLength(64).IsRequired().HasDefaultValue(AiContextChunk.LegacyEmbeddingModel);
+            entity.Property(c => c.EmbeddingModel).HasMaxLength(64).IsRequired()
+                .HasDefaultValue(BuildingFex.Api.ResidentCare.Domain.Model.Aggregates.AiContextChunk.LegacyEmbeddingModel);
         });
 
         // Team (5.8): team_workers + maintenance_tasks + shifts

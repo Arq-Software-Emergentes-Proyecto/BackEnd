@@ -1,18 +1,10 @@
-# Deploy API to AWS via GitHub Actions using OIDC role federation.
-# Requiere en GitHub:
-#   - Variable: AWS_REGION (ej. us-east-2)
-#   - Secreto: AWS_DEPLOY_ROLE_ARN
-#   - Secretos de la app: DB_CONNECTION_STRING, JWT_SECRET (obligatorios);
-#     MP_ACCESS_TOKEN, MP_PUBLIC_KEY, MP_WEBHOOK_SECRET, FIREBASE_CREDENTIALS_JSON, GEMINI_API_KEY (opcionales)
-#   - Variables opcionales: FRONTEND_ORIGINS, FRONTEND_BASE_URL, ALARM_EMAIL
-# Ver documentación completa en docs/DEPLOY-AWS.md.
-
 name: Deploy API to AWS
 
+# Despliega la API en AWS Lambda (template.yaml). Requiere en GitHub (Settings → Secrets and variables → Actions):
+#   variable AWS_REGION, secreto AWS_DEPLOY_ROLE_ARN (rol con OIDC) y los secretos de la app (ver docs/DEPLOY-AWS.md).
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'BuildingFex.Api/**'
       - 'template.yaml'
@@ -37,164 +29,111 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: 10.0.x
 
+      # Diagnóstico al lanzarlo a mano: qué identidad (sub/aud) manda GitHub a AWS. No imprime el token.
       - name: Show OIDC claims
         if: github.event_name == 'workflow_dispatch'
         run: |
-          python3 -c "
-          import os, json, base64, urllib.request
-          token_url = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL')
-          bearer = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN')
-          if not token_url or not bearer:
-              print('OIDC token request URL or bearer not found')
-              exit(0)
-          req = urllib.request.Request(f'{token_url}&audience=sts.amazonaws.com', headers={'Authorization': f'bearer {bearer}'})
-          with urllib.request.urlopen(req) as resp:
-              data = json.loads(resp.read().decode('utf-8'))
-              token = data.get('value', '')
-          parts = token.split('.')
-          if len(parts) >= 2:
-              payload = parts[1]
-              payload += '=' * (-len(payload) % 4)
-              claims = json.loads(base64.urlsafe_b64decode(payload.encode('utf-8')).decode('utf-8'))
-              print('=== OIDC Claims for AWS Trust Policy ===')
-              for key in ['sub', 'aud', 'repository', 'ref', 'repository_owner']:
-                  print(f'{key}: {claims.get(key)}')
-          "
+          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+          | python3 -c 'import sys,json,base64; t=json.load(sys.stdin)["value"].split(".")[1]; c=json.loads(base64.urlsafe_b64decode(t+"="*(-len(t)%4))); print(json.dumps({k:c.get(k) for k in ("sub","aud","repository","ref","repository_owner")}, indent=2))'
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Setup AWS SAM CLI
-        uses: aws-actions/setup-sam@v2
+      - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
 
+      # URL de la API si el stack ya existe: el webhook de Mercado Pago apunta a ella.
       - name: Current API URL
         id: current
         run: |
-          api_url=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+          url=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text 2>/dev/null || true)
-          if [ "$api_url" = "None" ]; then api_url=""; fi
-          echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
+          [ "$url" = "None" ] && url=""
+          echo "api_url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Publish
-        run: |
-          dotnet publish BuildingFex.Api -c Release -r linux-arm64 --self-contained false -p:PublishReadyToRun=true -o .aws-publish
+        run: >
+          dotnet publish BuildingFex.Api -c Release -r linux-arm64 --self-contained false
+          -p:PublishReadyToRun=true -o .aws-publish
 
-      # Los secretos van en appsettings.Local.json del paquete porque la organización de AWS bloquea SSM
-      # y las variables de entorno de Lambda no alcanzan para el JSON de Firebase.
+      # Los secretos van en appsettings.Local.json dentro del paquete (la organización de AWS bloquea SSM y las
+      # variables de entorno de Lambda no alcanzan para el JSON de Firebase).
       - name: Write app settings
         env:
           DB_CONNECTION_STRING: ${{ secrets.DB_CONNECTION_STRING }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MP_ACCESS_TOKEN: ${{ secrets.MP_ACCESS_TOKEN }}
           MP_PUBLIC_KEY: ${{ secrets.MP_PUBLIC_KEY }}
           MP_WEBHOOK_SECRET: ${{ secrets.MP_WEBHOOK_SECRET }}
           FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          webhook_url=""
-          if [ -n "${{ steps.current.outputs.api_url }}" ]; then
-            webhook_url="${{ steps.current.outputs.api_url }}/api/v1/payments/webhook"
-          fi
-          python3 .github/scripts/lambda_settings.py .aws-publish "$webhook_url"
+        run: >
+          python3 .github/scripts/lambda_settings.py .aws-publish
+          "${{ steps.current.outputs.api_url && format('{0}/api/v1/payments/webhook', steps.current.outputs.api_url) || '' }}"
 
       - name: Deploy stack
-        run: |
-          sam deploy \
-            --template-file template.yaml \
-            --stack-name "$STACK_NAME" \
-            --resolve-s3 \
-            --capabilities CAPABILITY_IAM \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              "FrontendOrigins=$FRONTEND_ORIGINS" \
-              "FrontendBaseUrl=$FRONTEND_BASE_URL" \
-              "AlarmEmail=$ALARM_EMAIL"
+        run: >
+          sam deploy --template-file template.yaml --stack-name "$STACK_NAME"
+          --resolve-s3 --capabilities CAPABILITY_IAM
+          --no-confirm-changeset --no-fail-on-empty-changeset
+          --parameter-overrides "FrontendOrigins=$FRONTEND_ORIGINS" "FrontendBaseUrl=$FRONTEND_BASE_URL" "AlarmEmail=$ALARM_EMAIL"
 
       - name: Read stack outputs
         id: stack
         run: |
           set -euo pipefail
-          api_url=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
-          jobs_function=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='JobsFunctionName'].OutputValue" --output text)
-          echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
-          echo "jobs_function=$jobs_function" >> "$GITHUB_OUTPUT"
+          out() {
+            aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          echo "api_url=$(out ApiUrl)" >> "$GITHUB_OUTPUT"
+          echo "jobs_function=$(out JobsFunctionName)" >> "$GITHUB_OUTPUT"
 
+      # Primer despliegue: recién ahora se conoce la URL de la API; se vuelve a desplegar con el webhook.
       - name: Set Mercado Pago webhook (first deploy)
         if: steps.current.outputs.api_url == ''
         env:
           DB_CONNECTION_STRING: ${{ secrets.DB_CONNECTION_STRING }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MP_ACCESS_TOKEN: ${{ secrets.MP_ACCESS_TOKEN }}
           MP_PUBLIC_KEY: ${{ secrets.MP_PUBLIC_KEY }}
           MP_WEBHOOK_SECRET: ${{ secrets.MP_WEBHOOK_SECRET }}
           FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          webhook_url="${{ steps.stack.outputs.api_url }}/api/v1/payments/webhook"
-          python3 .github/scripts/lambda_settings.py .aws-publish "$webhook_url"
-          sam deploy \
-            --template-file template.yaml \
-            --stack-name "$STACK_NAME" \
-            --resolve-s3 \
-            --capabilities CAPABILITY_IAM \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              "FrontendOrigins=$FRONTEND_ORIGINS" \
-              "FrontendBaseUrl=$FRONTEND_BASE_URL" \
-              "AlarmEmail=$ALARM_EMAIL"
+          set -euo pipefail
+          python3 .github/scripts/lambda_settings.py .aws-publish "${{ steps.stack.outputs.api_url }}/api/v1/payments/webhook"
+          sam deploy --template-file template.yaml --stack-name "$STACK_NAME" \
+            --resolve-s3 --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset --no-fail-on-empty-changeset \
+            --parameter-overrides "FrontendOrigins=$FRONTEND_ORIGINS" "FrontendBaseUrl=$FRONTEND_BASE_URL" "AlarmEmail=$ALARM_EMAIL"
 
       - name: Migrate database
         run: |
-          response_file=$(mktemp)
-          invoke_output=$(aws lambda invoke \
-            --function-name "${{ steps.stack.outputs.jobs_function }}" \
-            --cli-binary-format raw-in-base64-out \
-            --payload '{"job":"migrate"}' \
-            --cli-read-timeout 900 \
-            "$response_file" 2>&1)
-          echo "Lambda invoke response:"
-          cat "$response_file"
-          echo ""
-          func_error=$(echo "$invoke_output" | grep -o '"FunctionError": *"[^"]*"' || true)
-          if [ -n "$func_error" ] && [ "$func_error" != 'None' ]; then
-            echo "::error::La migración falló (ver respuesta arriba y CloudWatch)"
-            exit 1
-          fi
+          set -euo pipefail
+          aws lambda invoke --function-name "${{ steps.stack.outputs.jobs_function }}" \
+            --payload '{"job":"migrate"}' --cli-binary-format raw-in-base64-out \
+            --cli-read-timeout 900 --query FunctionError --output text migrate.json > error.txt
+          cat migrate.json; echo
+          if [ "$(cat error.txt)" != "None" ]; then echo "::error::La migración falló (ver respuesta arriba y CloudWatch)"; exit 1; fi
 
       - name: Health check
         run: |
-          api_url="${{ steps.stack.outputs.api_url }}"
-          success=0
-          for i in {1..5}; do
-            echo "Health check attempt $i of 5..."
-            if curl -fsS "$api_url/health"; then
-              echo "API is healthy!"
-              success=1
-              break
-            fi
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if curl -fsS "${{ steps.stack.outputs.api_url }}/health"; then echo; break; fi
+            [ "$i" = 5 ] && exit 1
             sleep 5
           done
-          if [ $success -ne 1 ]; then
-            echo "Health check failed after 5 attempts"
-            exit 1
-          fi
-          echo "### API desplegada: $api_url" >> "$GITHUB_STEP_SUMMARY"
+          echo "### API desplegada: ${{ steps.stack.outputs.api_url }}" >> "$GITHUB_STEP_SUMMARY"

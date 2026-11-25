@@ -57,12 +57,17 @@ public class ImportFoldersController(
         var folder = await FindFolderAsync(id, admin, ct);
         if (folder is null) return NotFound();
 
-        if (folder.IsHome)
-            folder.Patch("Home", true, folder.IsContext);
-        else if (folder.IsContext)
-            folder.Patch("Contexto IA", folder.IsHome, true);
+        if (folder.IsHome || folder.IsContext)
+        {
+            folder.Patch(
+                folder.IsHome ? "Home" : "Contexto IA",
+                folder.IsHome,
+                folder.IsContext);
+        }
         else
+        {
             folder.Patch(body.Name, body.IsHome, body.IsContext);
+        }
 
         await db.SaveChangesAsync(ct);
         return Ok(Map(folder));

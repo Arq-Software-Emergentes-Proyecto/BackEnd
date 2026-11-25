@@ -1,13 +1,5 @@
 namespace BuildingFex.Api.Communications.Domain.Model.Aggregates;
 
-public static class ImportUploadStatus
-{
-    /// <summary>Fila reservada; el binario aún no se confirmó en Storage.</summary>
-    public const string PendingUpload = "pending_upload";
-    /// <summary>Binario confirmado; visible en listados.</summary>
-    public const string Confirmed = "confirmed";
-}
-
 public static class ImportIndexingStatus
 {
     public const string None = "none";
@@ -15,6 +7,14 @@ public static class ImportIndexingStatus
     public const string Indexing = "indexing";
     public const string Done = "done";
     public const string Failed = "failed";
+}
+
+public static class ImportUploadStatus
+{
+    /// <summary>Fila reservada; el binario aún no se confirmó en Storage.</summary>
+    public const string PendingUpload = "pending_upload";
+    /// <summary>Binario confirmado; visible en listados.</summary>
+    public const string Confirmed = "confirmed";
 }
 
 /// <summary>DocumentType (Tabla 76): tipo de documento oficial.</summary>
@@ -74,6 +74,8 @@ public class ImportUpload
     public string DataUrl { get; private set; } = string.Empty;
     public string? FolderId { get; private set; }
     public string UploadStatus { get; private set; } = ImportUploadStatus.PendingUpload;
+    public string IndexingStatus { get; private set; } = ImportIndexingStatus.None;
+    public string? IndexingError { get; private set; }
     public DateTimeOffset UploadedAt { get; set; }
 
     /// <summary>REGULATION | MINUTES | OTHER</summary>
@@ -87,10 +89,6 @@ public class ImportUpload
 
     /// <summary>Documento anterior al que esta versión dejó sin vigencia (external id).</summary>
     public string? SupersedesId { get; private set; }
-
-    /// <summary>Estado de indexación RAG: none | pending | indexing | done | failed.</summary>
-    public string IndexingStatus { get; private set; } = ImportIndexingStatus.None;
-    public string? IndexingError { get; private set; }
 
     /// <summary>Vigente: confirmado y publicado.</summary>
     public bool IsCurrent =>
@@ -120,16 +118,16 @@ public class ImportUpload
             DataUrl = string.Empty,
             FolderId = string.IsNullOrWhiteSpace(folderId) ? null : folderId.Trim(),
             UploadStatus = ImportUploadStatus.PendingUpload,
+            IndexingStatus = ImportIndexingStatus.None,
             UploadedAt = DateTimeOffset.UtcNow,
             DocumentType = OfficialDocumentType.Normalize(documentType) ?? OfficialDocumentType.Other,
             DocumentStatus = OfficialDocumentStatus.PendingUpload,
             Version = 1,
-            IndexingStatus = ImportIndexingStatus.None,
         };
     }
 
     /// <summary>confirmUpload(): el binario está en Storage. Se publica de inmediato (comportamiento histórico).</summary>
-    public void Confirm(bool needsIndexing = false)
+    public void Confirm(bool needsIndexing)
     {
         UploadStatus = ImportUploadStatus.Confirmed;
         if (DocumentStatus == OfficialDocumentStatus.PendingUpload)
@@ -142,19 +140,18 @@ public class ImportUpload
         IndexingError = null;
     }
 
-    public void SetIndexingStatus(string status, string? error = null)
-    {
-        IndexingStatus = string.IsNullOrWhiteSpace(status) ? ImportIndexingStatus.None : status.Trim();
-        var clean = string.IsNullOrWhiteSpace(error) ? null : error.Trim();
-        IndexingError = clean is not null && clean.Length > 1024 ? clean[..1024] : clean;
-    }
-
     public void Patch(string? fileName, string? folderId)
     {
         if (fileName is not null)
             FileName = fileName.Trim();
         if (folderId is not null)
             FolderId = string.IsNullOrWhiteSpace(folderId) ? null : folderId.Trim();
+    }
+
+    public void SetIndexingStatus(string status, string? error = null)
+    {
+        IndexingStatus = status;
+        IndexingError = error;
     }
 
     public void SetDocumentType(string documentType)

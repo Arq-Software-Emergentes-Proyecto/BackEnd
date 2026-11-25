@@ -7,7 +7,7 @@ public class ImportFolder
     public string OwnerAdminId { get; private set; } = string.Empty;
     public string Name { get; private set; } = string.Empty;
     public bool IsHome { get; private set; }
-    /// <summary>Carpeta fija «Contexto IA» cuyos documentos vigentes alimentan al asistente.</summary>
+    /// <summary>Carpeta de reglas/contexto para el asistente (RAG).</summary>
     public bool IsContext { get; private set; }
     public DateTimeOffset CreatedAt { get; set; }
 

@@ -1,15 +1,15 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: >-
-  BuildingFex - API ASP.NET Core y funcion de jobs programados (EventBridge Scheduler) en Lambda detras de
-  API Gateway (HTTP API). Base de datos en TiDB Cloud y secretos en appsettings.Local.json dentro del paquete
-  (lo escribe .github/workflows/deploy-aws.yml desde los secretos de GitHub).
+Description: >
+  BuildingFex API serverless: ASP.NET Core en AWS Lambda detrás de API Gateway (HTTP API) y una función de
+  jobs programados (EventBridge Scheduler). Base de datos en TiDB Cloud. Los secretos van en
+  appsettings.Local.json dentro del paquete (lo escribe .github/workflows/deploy-aws.yml desde GitHub).
 
 Parameters:
   FrontendOrigins:
     Type: String
     Default: https://fronted-seven-opal.vercel.app
-    Description: Orígenes CORS permitidos, separados por coma.
+    Description: Orígenes permitidos por CORS, separados por coma.
   FrontendBaseUrl:
     Type: String
     Default: https://fronted-seven-opal.vercel.app
@@ -17,19 +17,16 @@ Parameters:
   FirebaseProjectId:
     Type: String
     Default: emergentes-36306
-    Description: Proyecto de Firebase (autenticación).
   FirebaseStorageBucket:
     Type: String
     Default: emergentes-36306.firebasestorage.app
-    Description: Bucket de Firebase Storage.
   ScheduleTimezone:
     Type: String
     Default: America/Lima
-    Description: Zona horaria para las expresiones cron de EventBridge Scheduler.
   AlarmEmail:
     Type: String
     Default: ''
-    Description: Correo que recibe las alarmas; vacío = sin suscripción, se ven en la consola.
+    Description: Correo que recibe las alarmas de CloudWatch (vacío = sin suscripción; se ven en la consola).
 
 Conditions:
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
@@ -38,11 +35,11 @@ Globals:
   Function:
     Runtime: dotnet10
     Architectures: [arm64]
-    # Salida de: dotnet publish BuildingFex.Api -c Release -r linux-arm64 --self-contained false -o .aws-publish
+    # Salida de `dotnet publish` (la genera el workflow antes de `sam deploy`).
     CodeUri: .aws-publish/
     Handler: BuildingFex.Api
     MemorySize: 1024
-    # Trazas de X-Ray (TS019).
+    # Trazas de X-Ray para ApiFunction y JobsFunction (TS019).
     Tracing: Active
     Environment:
       Variables:
@@ -54,7 +51,8 @@ Globals:
         BF_FILES_BUCKET: !Ref FilesBucket
 
 Resources:
-  # Documentos del condominio (Importación / contexto IA), privado, URLs de 15 min.
+  # Documentos del condominio (Importación / contexto IA). Privado: el navegador sube y descarga con
+  # URLs prefirmadas de 15 min que firma la API.
   FilesBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -102,14 +100,14 @@ Resources:
         Variables:
           BF_LAMBDA_ROLE: api
           BF_JOBS_FUNCTION_NAME: !Ref JobsFunction
-      Policies:
-        - S3CrudPolicy:
-            BucketName: !Ref FilesBucket
-        - LambdaInvokePolicy:
-            FunctionName: !Ref JobsFunction
       DeadLetterQueue:
         Type: SQS
         TargetArn: !GetAtt FailedJobsQueue.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref JobsFunction
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
       Events:
         Proxy:
           Type: HttpApi
@@ -118,14 +116,70 @@ Resources:
             Path: /{proxy+}
             Method: ANY
 
-  # Cola de fallos (TS019): invocaciones asíncronas y programaciones que no se pudieron completar.
+  JobsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: BuildingFex jobs (migrate, monthly-billing, import-cleanup, ai-index)
+      Timeout: 600
+      Environment:
+        Variables:
+          BF_LAMBDA_ROLE: jobs
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        # Invocaciones asíncronas que fallan tras el reintento (p. ej. indexación de un documento).
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt FailedJobsQueue.Arn
+      Events:
+        MonthlyBilling:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(15 6 * * ? *)
+            ScheduleExpressionTimezone: !Ref ScheduleTimezone
+            Input: '{"job":"monthly-billing"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
+        ImportCleanup:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(30 minutes)
+            Input: '{"job":"import-cleanup"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
+        AiIndexSweep:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(30 minutes)
+            Input: '{"job":"ai-index"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
+        IncidentEscalation:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(1 hour)
+            Input: '{"job":"incident-escalation"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
+
+  # Cola de fallos (TS019): invocaciones asíncronas y programaciones de EventBridge que no se pudieron completar.
   FailedJobsQueue:
     Type: AWS::SQS::Queue
     Properties:
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
 
-  # EventBridge Scheduler deja aquí sus fallos.
   FailedJobsQueuePolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
@@ -156,7 +210,7 @@ Resources:
   ApiErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: La API tuvo 5 o más errores en 5 minutos.
+      AlarmDescription: ApiFunction devuelve errores (excepciones no controladas o timeouts).
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -173,7 +227,7 @@ Resources:
   ApiThrottlesAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: Lambda rechazó invocaciones de la API por límite de concurrencia.
+      AlarmDescription: ApiFunction está siendo limitada por concurrencia.
       Namespace: AWS/Lambda
       MetricName: Throttles
       Dimensions:
@@ -190,7 +244,7 @@ Resources:
   Api5xxAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: API Gateway devolvió 10 o más respuestas 5xx en 5 minutos.
+      AlarmDescription: API Gateway responde 5xx.
       Namespace: AWS/ApiGateway
       MetricName: 5xx
       Dimensions:
@@ -207,7 +261,7 @@ Resources:
   JobsErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: La función de jobs tuvo al menos un error en la última hora.
+      AlarmDescription: Falló un job programado o asíncrono de JobsFunction.
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -224,7 +278,7 @@ Resources:
   FailedJobsQueueAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: Hay mensajes en la cola de fallos.
+      AlarmDescription: Hay mensajes en la cola de fallos; revisar y reprocesar.
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -244,63 +298,6 @@ Resources:
       LogGroupName: !Sub /aws/lambda/${ApiFunction}
       RetentionInDays: 14
 
-  JobsFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      Description: BuildingFex jobs (migrate, monthly-billing, import-cleanup, ai-index, incident-escalation)
-      Timeout: 600
-      Environment:
-        Variables:
-          BF_LAMBDA_ROLE: jobs
-      Policies:
-        - S3CrudPolicy:
-            BucketName: !Ref FilesBucket
-      EventInvokeConfig:
-        MaximumRetryAttempts: 1
-        # Invocaciones asíncronas que fallan tras el reintento (p. ej. indexar un documento) van a la cola (TS019).
-        DestinationConfig:
-          OnFailure:
-            Type: SQS
-            Destination: !GetAtt FailedJobsQueue.Arn
-      Events:
-        MonthlyBilling:
-          Type: ScheduleV2
-          Properties:
-            ScheduleExpression: "cron(15 6 * * ? *)"
-            ScheduleExpressionTimezone: !Ref ScheduleTimezone
-            Input: '{"job":"monthly-billing"}'
-            RetryPolicy:
-              MaximumRetryAttempts: 2
-            DeadLetterConfig:
-              Arn: !GetAtt FailedJobsQueue.Arn
-        ImportCleanup:
-          Type: ScheduleV2
-          Properties:
-            ScheduleExpression: "rate(30 minutes)"
-            Input: '{"job":"import-cleanup"}'
-            RetryPolicy:
-              MaximumRetryAttempts: 2
-            DeadLetterConfig:
-              Arn: !GetAtt FailedJobsQueue.Arn
-        AiIndexSweep:
-          Type: ScheduleV2
-          Properties:
-            ScheduleExpression: "rate(30 minutes)"
-            Input: '{"job":"ai-index"}'
-            RetryPolicy:
-              MaximumRetryAttempts: 2
-            DeadLetterConfig:
-              Arn: !GetAtt FailedJobsQueue.Arn
-        IncidentEscalation:
-          Type: ScheduleV2
-          Properties:
-            ScheduleExpression: rate(1 hour)
-            Input: '{"job":"incident-escalation"}'
-            RetryPolicy:
-              MaximumRetryAttempts: 2
-            DeadLetterConfig:
-              Arn: !GetAtt FailedJobsQueue.Arn
-
   JobsLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -309,20 +306,15 @@ Resources:
 
 Outputs:
   ApiUrl:
-    Description: URL pública de la API; va en el rewrite de Vercel / VITE_API_BASE_URL.
+    Description: URL base de la API (va en el rewrite de Vercel / VITE_API_BASE_URL).
     Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
   ApiFunctionName:
-    Description: Nombre de la función Lambda de la API.
     Value: !Ref ApiFunction
   JobsFunctionName:
-    Description: Nombre de la función Lambda de jobs.
     Value: !Ref JobsFunction
+  FilesBucketName:
+    Value: !Ref FilesBucket
   FailedJobsQueueUrl:
-    Description: URL de la cola de fallos.
     Value: !Ref FailedJobsQueue
   AlarmTopicArn:
-    Description: Tema SNS de las alarmas.
     Value: !Ref AlarmTopic
-  FilesBucketName:
-    Description: Nombre del bucket S3 privado para documentos.
-    Value: !Ref FilesBucket

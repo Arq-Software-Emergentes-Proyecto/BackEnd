@@ -1,146 +1,70 @@
 # Despliegue serverless en AWS
 
-Este documento describe la arquitectura, configuración y procedimiento de despliegue continuo de la API de BuildingFex en Amazon Web Services (AWS) usando AWS Lambda, API Gateway HTTP API y AWS SAM con autenticación OIDC de GitHub Actions.
-
----
-
-## Arquitectura
-
-La API se ejecuta sobre una infraestructura serverless en **AWS Lambda (.NET 10, ARM64)** ubicada en la región de **Ohio (`us-east-2`)**, expuesta mediante **API Gateway (HTTP API)**. La base de datos es **TiDB Cloud Starter** (compatible con MySQL 8.0/8.4), la autenticación de usuarios opera contra **Firebase Auth**, y todo el ciclo de entrega continua se automatiza mediante el workflow [.github/workflows/deploy-aws.yml](file:///.github/workflows/deploy-aws.yml) y la plantilla [template.yaml](file:///template.yaml).
+La API corre en **AWS Lambda** (.NET 10, ARM) en **Ohio (us-east-2)** detrás de **API Gateway HTTP API**. La base de datos es
+**TiDB Cloud Starter** (compatible con MySQL) y el login sigue en **Firebase Auth**. Todo se despliega con
+`.github/workflows/deploy-aws.yml` usando `template.yaml` (AWS SAM).
 
 | Pieza | Servicio |
-| :--- | :--- |
-| **API REST** | `ApiFunction` + API Gateway HTTP API |
-| **Cobro mensual** (diario 06:15 Lima) | `JobsFunction` + EventBridge Scheduler (`cron(15 6 * * ? *)`) |
-| **Limpieza de importaciones** (cada 30 min) | `JobsFunction` + EventBridge Scheduler (`rate(30 minutes)`) |
-| **Barrido de indexación IA** (cada 30 min) | `JobsFunction` + EventBridge Scheduler (US042) |
-| **Indexación IA al subir un documento** | La API invoca `JobsFunction` en modo asíncrono (US042) |
-| **Migración del esquema** | Job `migrate` ejecutado en `JobsFunction` tras cada despliegue |
-| **Secretos y configuración** | `appsettings.Local.json` empaquetado en el artefacto (desde GitHub Secrets; SSM bloqueado por la organización AWS) |
-| **Escalado de incidencias** (cada hora) | `JobsFunction` + EventBridge Scheduler (`rate(1 hour)`, US048) |
-| **Monitoreo** | Trazas de X-Ray en ambas funciones; alarmas de CloudWatch (errores y throttles de la API, 5xx de API Gateway, errores de jobs) y la cola SQS `FailedJobsQueue` |
-| **Tiempo real de chat de soporte** | Polling HTTP (SignalR no mantiene conexiones persistentes en Lambda) |
-
----
+| --- | --- |
+| API REST | Lambda `ApiFunction` + API Gateway HTTP API |
+| Cobro mensual (diario 06:15 Lima), limpieza de importaciones (30 min), barrido de indexación IA (30 min) | Lambda `JobsFunction` + EventBridge Scheduler |
+| Indexación IA al subir un documento | La API invoca `JobsFunction` en modo asíncrono |
+| Migración del esquema | Job `migrate`, lo invoca el workflow después de cada despliegue |
+| Secretos | `appsettings.Local.json` dentro del paquete de la Lambda (lo escribe el workflow desde los secretos de GitHub; la organización de AWS bloquea SSM) |
+| Tiempo real del chat de soporte | Por ahora **polling** (SignalR no funciona en Lambda) |
+| Monitoreo | Trazas de X-Ray en ambas funciones, alarmas de CloudWatch (errores y throttles de la API, 5xx de API Gateway, errores de jobs) y la cola SQS `FailedJobsQueue` para jobs asíncronos y programaciones fallidas |
 
 ## Lo que se configura una sola vez (a mano)
 
-### 1. Base de datos: TiDB Cloud Starter
-1. En la consola de TiDB Cloud, ve a **Connect** → **Public** → **Generate Password**.
-2. Copia la cadena de conexión generada y reemplaza las credenciales por marcadores:
-   ```
-   Server=<host>;Port=4000;Database=buildingfex;Uid=<usuario>;Pwd=<contraseña>;SslMode=VerifyFull;
-   ```
-   > [!CAUTION]
-   > Nunca subas la cadena de conexión real al repositorio ni la registres en commits.
+1. **TiDB**: en el clúster `buildingfex` → *Connect* → *Public* → *Generate Password*. Arma la cadena:
+   `server=<host>;port=4000;database=buildingfex;user=<usuario>;password=<contraseña>;SslMode=VerifyFull`
+2. **AWS IAM**:
+   - Proveedor OIDC `token.actions.githubusercontent.com` (audiencia `sts.amazonaws.com`).
+   - Rol `buildingfex-github-deploy` cuya política de confianza permita el `sub`
+     `repo:Arq-Software-Emergentes-Proyecto@334218460/BackEnd@1389344396:ref:refs/heads/main`
+     (esta organización de GitHub incluye los IDs fijos en el `sub`; un run manual muestra los claims en el paso
+     "Show OIDC claims").
+   - Políticas del rol: `AWSCloudFormationFullAccess`, `AWSLambda_FullAccess`, `AmazonAPIGatewayAdministrator`,
+     `AmazonS3FullAccess`, `AmazonEventBridgeSchedulerFullAccess`, `CloudWatchLogsFullAccess`,
+     `CloudWatchFullAccess`, `AmazonSQSFullAccess`, `AmazonSNSFullAccess`
+     e `IAMFullAccess` (SAM crea los roles de las funciones y del scheduler).
+3. **GitHub** (repo backend → *Settings → Secrets and variables → Actions*):
+   - Variable `AWS_REGION` = `us-east-2` y secreto `AWS_DEPLOY_ROLE_ARN`. La organización de AWS (SCP `AdvancedModeRegionRestrictionSecurityControlPolicy`) solo permite servicios regionales en us-east-2.
+   - Secretos obligatorios: `DB_CONNECTION_STRING`, `JWT_SECRET` (32+ caracteres).
+   - Secretos opcionales: `GEMINI_API_KEY`, `MP_ACCESS_TOKEN`, `MP_PUBLIC_KEY`, `MP_WEBHOOK_SECRET`,
+     `FIREBASE_CREDENTIALS_JSON` (JSON de la cuenta de servicio de Firebase, para Storage y custom claims).
+   - Variables opcionales: `FRONTEND_ORIGINS`, `FRONTEND_BASE_URL` (por defecto `https://fronted-seven-opal.vercel.app`),
+     `ALARM_EMAIL` (correo que recibe las alarmas; hay que confirmar la suscripción desde el correo de AWS).
+4. **Firebase** (`emergentes-36306`): proveedores Google y Correo/contraseña activos y
+   `fronted-seven-opal.vercel.app` en *Authentication → Settings → Authorized domains*.
 
-### 2. AWS IAM (Rol OIDC para GitHub Actions)
-1. En AWS IAM, registra un proveedor de identidad OIDC:
-   - **Provider URL**: `https://token.actions.githubusercontent.com`
-   - **Audience**: `sts.amazonaws.com`
-2. Crea el rol IAM `buildingfex-github-deploy` con una Trust Policy que permita asumir el rol únicamente desde el repositorio y rama designada:
-   ```json
-   {
-     "Version": "2012-10-17",
-     "Statement": [
-       {
-         "Effect": "Allow",
-         "Principal": {
-           "Federated": "arn:aws:iam::<ID-CUENTA>:oidc-provider/token.actions.githubusercontent.com"
-         },
-         "Action": "sts:AssumeRoleWithWebIdentity",
-         "Condition": {
-           "StringEquals": {
-             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-           },
-           "StringLike": {
-             "token.actions.githubusercontent.com:sub": "repo:Arq-Software-Emergentes-Proyecto@*:ref:refs/heads/main"
-           }
-         }
-       }
-     ]
-   }
-   ```
-   > [!NOTE]
-   > Esta organización de GitHub incluye IDs numéricos fijos en el claim `sub` (ej. `repo:Arq-Software-Emergentes-Proyecto@<id-org>/BackEnd@1468048790:ref:refs/heads/main`). Para obtener el claim exacto, ejecuta el workflow manualmente desde Actions (`workflow_dispatch`), el cual ejecutará el paso *Show OIDC claims* imprimiendo el `sub` exacto sin exponer tokens.
-3. Asigna las siguientes políticas administradas al rol `buildingfex-github-deploy`:
-   - `AWSCloudFormationFullAccess`
-   - `AWSLambda_FullAccess`
-   - `AmazonAPIGatewayAdministrator`
-   - `AmazonS3FullAccess`
-   - `AmazonEventBridgeSchedulerFullAccess`
-   - `CloudWatchLogsFullAccess`
-   - `CloudWatchFullAccess`, `AmazonSQSFullAccess` y `AmazonSNSFullAccess` (alarmas, cola de fallos y avisos, TS019)
-   - `IAMFullAccess` (necesario para que SAM gestione los roles de ejecución de las Lambdas y de EventBridge).
+## Desplegar
 
-### 3. GitHub Secrets y Variables
-En el repositorio de GitHub (**Settings → Secrets and variables → Actions**), configura:
+Cada push a `main` que toque la API despliega solo; también se puede lanzar a mano en *Actions → Deploy API to AWS
+→ Run workflow*. Al terminar, el resumen del run muestra la URL de la API
+(hoy `https://xafqa6wdb2.execute-api.us-east-2.amazonaws.com`). Esa URL va en el front (rewrite de Vercel).
 
-- **Variables (Actions Variables)**:
-  - `AWS_REGION`: `us-east-2` (Ohio; las restricciones de la organización de AWS exigen esta región).
-  - `FRONTEND_ORIGINS` (opcional): orígenes CORS permitidos (por defecto `https://fronted-seven-opal.vercel.app`).
-  - `FRONTEND_BASE_URL` (opcional): URL base del frontend para redirecciones de pago.
-  - `ALARM_EMAIL` (opcional): correo que recibe las alarmas. AWS envía un correo de confirmación de la suscripción que hay que aceptar.
-
-- **Secretos (Actions Secrets)**:
-  - `AWS_DEPLOY_ROLE_ARN`: ARN del rol `buildingfex-github-deploy` creado en IAM.
-  - `DB_CONNECTION_STRING`: Cadena de conexión MySQL a TiDB Cloud con `SslMode=VerifyFull`. *(Obligatorio)*
-  - `JWT_SECRET`: Clave simétrica de al menos 32 caracteres para el firmado de tokens de sesión. *(Obligatorio)*
-  - `MP_ACCESS_TOKEN`, `MP_PUBLIC_KEY`, `MP_WEBHOOK_SECRET`: Credenciales de Mercado Pago. *(Opcionales)*
-  - `FIREBASE_CREDENTIALS_JSON`: Contenido completo del archivo JSON de la clave de servicio de Firebase Admin SDK. *(Opcional)*
-  - `GEMINI_API_KEY`: Clave de Google AI Studio para el chat con IA. Sin ella la API arranca, pero el chat responde `GEMINI_API_KEY_MISSING`. *(Opcional)*
-
-### 4. Firebase Auth
-- Verifica en la consola de Firebase que los proveedores **Google** y **Correo/contraseña** estén habilitados.
-- En **Authentication → Settings → Authorized domains**, añade el dominio del frontend desplegado en Vercel.
-
----
-
-## Despliegue
-
-- **Automático**: Cada `push` a la rama `main` que afecte `BuildingFex.Api/**`, `template.yaml` o `.github/workflows/deploy-aws.yml` dispara el despliegue serverless de forma desatendida.
-- **Manual**: Desde la pestaña **Actions** en GitHub → seleccionar **Deploy API to AWS** → clic en **Run workflow**.
-
-Al finalizar, el resumen del run en GitHub Actions (*GITHUB_STEP_SUMMARY*) muestra la URL pública generada para la API:
-```
-### API desplegada: https://<api-id>.execute-api.us-east-2.amazonaws.com
-```
-Esta URL debe colocarse en las variables de entorno / rewrite de Vercel del frontend (`VITE_API_BASE_URL`).
-
-Para actualizar secretos o credenciales: actualiza el secreto en GitHub Actions y vuelve a ejecutar el despliegue.
-
----
+Los secretos se leen de GitHub en cada despliegue: para cambiar uno, actualízalo en GitHub y vuelve a desplegar.
 
 ## Probar los jobs a mano
 
-Puedes disparar manualmente cualquiera de los jobs periódicos de `JobsFunction` utilizando el AWS CLI:
-
 ```bash
-aws lambda invoke \
-  --function-name <JobsFunctionName> \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"job":"monthly-billing"}' \
-  response.json && cat response.json
+aws lambda invoke --function-name <JobsFunctionName> --payload '{"job":"monthly-billing"}' \
+  --cli-binary-format raw-in-base64-out out.json && cat out.json
 ```
 
-Jobs disponibles:
-- `migrate`: Aplica las migraciones de esquema EF Core y datos iniciales.
-- `monthly-billing`: Emisión y cálculo de cuotas de mantenimiento para todos los condominios.
-- `import-cleanup`: Eliminación de archivos temporales huérfanos que excedieron el TTL.
-- `incident-escalation`: Escalado (cada hora) de incidencias abiertas sin proveedor después de 48 h.
-- `ai-index`: Indexación RAG de documentos en Contexto IA (acepta `"uploadId"` opcional; sin él barre pendientes y embeddings obsoletos).
-
----
+Jobs: `migrate`, `monthly-billing`, `import-cleanup`, `incident-escalation` (cada hora), `ai-index` (opcional `"uploadId"`).
 
 ## Local y Railway
 
-Fuera del entorno AWS Lambda nada cambia:
-- Al correr localmente (`dotnet run`) o en contenedores (Railway/Docker), el servidor aplica el esquema automáticamente al iniciar en frío.
-- Los procesos periódicos son ejecutados por los `BackgroundService` en segundo plano en memoria.
-- SignalR opera con WebSockets continuos para el soporte en vivo.
+Nada cambia fuera de Lambda: el servidor normal sigue aplicando el esquema al arrancar y corriendo los
+`BackgroundService`, y SignalR sigue activo.
 
 ## Monitoreo y fallos
 
-- **Trazas:** X-Ray está activo en `ApiFunction` y `JobsFunction`. Se ven en CloudWatch → X-Ray traces → Trace map.
-- **Alarmas** (avisan al tema SNS `AlarmTopic`, y por correo si `ALARM_EMAIL` está definida): errores de la API (≥ 5 en 5 min), throttles de la API (≥ 1 en 5 min), 5xx de API Gateway (≥ 10 en 5 min), errores de jobs (≥ 1 en 1 h) y mensajes en la cola de fallos (≥ 1).
-- **Cola de fallos** (`FailedJobsQueue`, 14 días): recibe las invocaciones asíncronas de `ApiFunction` y `JobsFunction` que fallan tras su reintento, y las programaciones de EventBridge Scheduler que no se pudieron entregar después de 2 reintentos. Para reprocesar, lee el mensaje en la consola de SQS y vuelve a invocar el job con el mismo payload (ver "Probar los jobs a mano").
+- **Trazas**: X-Ray activo en `ApiFunction` y `JobsFunction` (consola de CloudWatch → *X-Ray traces*).
+- **Alarmas** (tema SNS `AlarmTopic`): errores de la API (≥ 5 en 5 min), throttles de la API, 5xx de API Gateway
+  (≥ 10 en 5 min), cualquier error de `JobsFunction` en 1 h y mensajes en la cola de fallos.
+- **Cola de fallos** (`FailedJobsQueue`, 14 días): recibe las invocaciones asíncronas de `JobsFunction` que fallan tras el
+  reintento y las programaciones de EventBridge que no se pudieron entregar. Para reprocesar, lee el mensaje y vuelve a
+  invocar el job con el mismo payload.

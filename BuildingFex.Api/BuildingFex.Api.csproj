@@ -13,6 +13,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <InternalsVisibleTo Include="BuildingFex.Api.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
         <PackageReference Include="Amazon.Extensions.Configuration.SystemsManager" Version="7.1.1" />
         <PackageReference Include="Amazon.Lambda.AspNetCoreServer.Hosting" Version="2.2.1" />
         <PackageReference Include="AWSSDK.Lambda" Version="4.0.110.1" />
@@ -31,12 +35,8 @@
         <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.0" />
         <PackageReference Include="Humanizer" Version="3.0.10" />
         <PackageReference Include="mercadopago-sdk" Version="3.2.0" />
-        <PackageReference Include="ClosedXML" Version="0.105.0" />
         <PackageReference Include="PdfPig" Version="0.1.9" />
-    </ItemGroup>
-
-    <ItemGroup>
-        <InternalsVisibleTo Include="BuildingFex.Api.Tests" />
+        <PackageReference Include="ClosedXML" Version="0.105.0" />
     </ItemGroup>
 
 </Project>

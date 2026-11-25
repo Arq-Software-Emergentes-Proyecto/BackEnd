@@ -1,45 +1,15 @@
 using BuildingFex.Api.Shared.Infrastructure.Hosting;
-using Xunit;
 
 namespace BuildingFex.Api.Tests.Serverless;
 
-[CollectionDefinition(nameof(LambdaEnvironment), DisableParallelization = true)]
-public class LambdaEnvironmentDefinition : ICollectionFixture<LambdaEnvironmentFixture>
-{
-}
-
-public class LambdaEnvironmentFixture
-{
-}
-
-public sealed class LambdaEnvironment : IDisposable
-{
-    private readonly string? _originalFunctionName;
-    private readonly string? _originalRole;
-
-    public LambdaEnvironment(string? functionName = null, string? role = null)
-    {
-        _originalFunctionName = Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME");
-        _originalRole = Environment.GetEnvironmentVariable(LambdaHosting.RoleVariable);
-
-        Environment.SetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME", functionName);
-        Environment.SetEnvironmentVariable(LambdaHosting.RoleVariable, role);
-    }
-
-    public void Dispose()
-    {
-        Environment.SetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME", _originalFunctionName);
-        Environment.SetEnvironmentVariable(LambdaHosting.RoleVariable, _originalRole);
-    }
-}
-
+/// <summary>Las variables de entorno son del proceso: estas pruebas no corren en paralelo con otras de la colección.</summary>
 [Collection(nameof(LambdaEnvironment))]
 public class LambdaHostingTests
 {
     [Fact]
     public void Outside_lambda_nothing_changes()
     {
-        using var env = new LambdaEnvironment(null, null);
+        using var env = new LambdaEnvironment(functionName: null, role: null);
 
         Assert.False(LambdaHosting.IsLambda);
         Assert.False(LambdaHosting.IsJobsFunction);
@@ -49,7 +19,7 @@ public class LambdaHostingTests
     [Fact]
     public void Jobs_role_runs_the_jobs_function()
     {
-        using var env = new LambdaEnvironment("buildingfex-jobs", "jobs");
+        using var env = new LambdaEnvironment(functionName: "buildingfex-jobs", role: "jobs");
 
         Assert.True(LambdaHosting.IsLambda);
         Assert.True(LambdaHosting.IsJobsFunction);
@@ -58,9 +28,32 @@ public class LambdaHostingTests
     [Fact]
     public void Api_role_serves_http()
     {
-        using var env = new LambdaEnvironment("buildingfex-api", "api");
+        using var env = new LambdaEnvironment(functionName: "buildingfex-api", role: "api");
 
         Assert.True(LambdaHosting.IsLambda);
         Assert.False(LambdaHosting.IsJobsFunction);
+    }
+}
+
+[CollectionDefinition(nameof(LambdaEnvironment), DisableParallelization = true)]
+public sealed class LambdaEnvironment : IDisposable
+{
+    private readonly string? _function = Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME");
+    private readonly string? _role = Environment.GetEnvironmentVariable(LambdaHosting.RoleVariable);
+
+    public LambdaEnvironment() : this(null, null)
+    {
+    }
+
+    public LambdaEnvironment(string? functionName, string? role)
+    {
+        Environment.SetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME", functionName);
+        Environment.SetEnvironmentVariable(LambdaHosting.RoleVariable, role);
+    }
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME", _function);
+        Environment.SetEnvironmentVariable(LambdaHosting.RoleVariable, _role);
     }
 }

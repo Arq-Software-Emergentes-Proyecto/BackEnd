@@ -162,10 +162,12 @@ public static class SchemaUpgrade
             """, ct);
 
         await MigrateSupportMessagesFromJsonAsync(db, logger, ct);
+
+        // ResidentCare (RF033): documento citado por el asistente en cada respuesta.
         await EnsureColumnAsync(db, logger, "support_messages", "cited_document_id", "VARCHAR(128) NULL", ct);
         await EnsureColumnAsync(db, logger, "support_messages", "cited_source", "VARCHAR(512) NULL", ct);
 
-        // ResidentCare (CON11): contador mensual de consultas IA por cuenta, único por (owner, periodo).
+        // ResidentCare (CON11): contador mensual de consultas IA por edificio, único por (owner, periodo).
         await EnsureTableAsync(db, logger, """
             CREATE TABLE IF NOT EXISTS ai_usages (
               id INT NOT NULL AUTO_INCREMENT,
@@ -176,22 +178,6 @@ public static class SchemaUpgrade
               updated_at DATETIME(6) NOT NULL,
               PRIMARY KEY (id),
               UNIQUE KEY ix_ai_usages_owner_admin_id_period (owner_admin_id, period)
-            );
-            """, ct);
-
-        // ResidentCare (US045): mensajes filtrados sin IA y contador diario de consultas por residente.
-        await EnsureColumnAsync(db, logger, "ai_usages", "filtered_count", "INT NOT NULL DEFAULT 0", ct);
-        await EnsureTableAsync(db, logger, """
-            CREATE TABLE IF NOT EXISTS resident_ai_usages (
-              id INT NOT NULL AUTO_INCREMENT,
-              owner_admin_id VARCHAR(128) NOT NULL,
-              resident_id VARCHAR(128) NOT NULL,
-              `day` VARCHAR(10) NOT NULL,
-              query_count INT NOT NULL DEFAULT 0,
-              created_at DATETIME(6) NOT NULL,
-              updated_at DATETIME(6) NOT NULL,
-              PRIMARY KEY (id),
-              UNIQUE KEY ix_resident_ai_usages_owner_resident_day (owner_admin_id, resident_id, `day`)
             );
             """, ct);
 
@@ -234,12 +220,29 @@ public static class SchemaUpgrade
             );
             """, ct);
 
+        // ResidentCare (CON11): consultas filtradas sin IA y límite diario de consultas por residente.
+        await EnsureColumnAsync(db, logger, "ai_usages", "filtered_count", "INT NOT NULL DEFAULT 0", ct);
+        await EnsureTableAsync(db, logger, """
+            CREATE TABLE IF NOT EXISTS resident_ai_usages (
+              id INT NOT NULL AUTO_INCREMENT,
+              owner_admin_id VARCHAR(128) NOT NULL,
+              resident_id VARCHAR(128) NOT NULL,
+              day VARCHAR(10) NOT NULL,
+              query_count INT NOT NULL DEFAULT 0,
+              created_at DATETIME(6) NOT NULL,
+              updated_at DATETIME(6) NOT NULL,
+              PRIMARY KEY (id),
+              UNIQUE KEY ix_resident_ai_usages_owner_resident_day (owner_admin_id, resident_id, day)
+            );
+            """, ct);
+
+        await EnsureColumnAsync(db, logger, "import_folders", "is_context", "TINYINT(1) NOT NULL DEFAULT 0", ct);
+
         await EnsureColumnAsync(db, logger, "import_uploads", "storage_path", "VARCHAR(1024) NOT NULL DEFAULT ''", ct);
         await EnsureColumnAsync(db, logger, "import_uploads", "download_url", "LONGTEXT NULL", ct);
         await EnsureColumnAsync(db, logger, "import_uploads", "upload_status", "VARCHAR(32) NOT NULL DEFAULT 'confirmed'", ct);
         await EnsureColumnAsync(db, logger, "import_uploads", "indexing_status", "VARCHAR(32) NOT NULL DEFAULT 'none'", ct);
         await EnsureColumnAsync(db, logger, "import_uploads", "indexing_error", "VARCHAR(1024) NULL", ct);
-        await EnsureColumnAsync(db, logger, "import_folders", "is_context", "TINYINT(1) NOT NULL DEFAULT 0", ct);
 
         // Después de upload_status (el backfill PENDING_UPLOAD lo lee): en DBs muy antiguas la columna aún no existía.
         await ApplyOfficialDocumentsAsync(db, logger, ct);
@@ -318,7 +321,11 @@ public static class SchemaUpgrade
               KEY ix_ai_context_chunks_upload (upload_external_id)
             );
             """, ct);
-        await EnsureColumnAsync(db, logger, "ai_context_chunks", "embedding_model", "VARCHAR(64) NOT NULL DEFAULT 'text-embedding-004'", ct);
+
+        // RAG: modelo de embeddings de cada chunk. Los existentes se generaron con text-embedding-004
+        // (el DEFAULT los rellena); vectores de otro modelo no se comparan por coseno.
+        await EnsureColumnAsync(db, logger, "ai_context_chunks", "embedding_model",
+            $"VARCHAR(64) NOT NULL DEFAULT '{BuildingFex.Api.ResidentCare.Domain.Model.Aggregates.AiContextChunk.LegacyEmbeddingModel}'", ct);
 
         await ApplySubscriptionPaymentsAsync(db, logger, ct);
     }
