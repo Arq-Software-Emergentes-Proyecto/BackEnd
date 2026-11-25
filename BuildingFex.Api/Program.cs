@@ -122,8 +122,20 @@ builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configu
     builder.Configuration.GetSection(BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings.SectionName));
 builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configuration.FirebaseStorageSettings>(
     builder.Configuration.GetSection(BuildingFex.Api.Communications.Infrastructure.Configuration.FirebaseStorageSettings.SectionName));
-builder.Services.AddSingleton<BuildingFex.Api.Communications.Infrastructure.Storage.IFirebaseStorageService,
-    BuildingFex.Api.Communications.Infrastructure.Storage.FirebaseStorageService>();
+// Archivos: Amazon S3 cuando el despliegue define BF_FILES_BUCKET (AWS); si no, Firebase Storage.
+if (BuildingFex.Api.Communications.Infrastructure.Storage.S3StorageService.ConfiguredBucket is { } filesBucket)
+{
+    builder.Services.AddSingleton<Amazon.S3.IAmazonS3>(_ => new Amazon.S3.AmazonS3Client());
+    builder.Services.AddSingleton<BuildingFex.Api.Communications.Infrastructure.Storage.IFirebaseStorageService>(sp =>
+        new BuildingFex.Api.Communications.Infrastructure.Storage.S3StorageService(
+            sp.GetRequiredService<Amazon.S3.IAmazonS3>(),
+            filesBucket));
+}
+else
+{
+    builder.Services.AddSingleton<BuildingFex.Api.Communications.Infrastructure.Storage.IFirebaseStorageService,
+        BuildingFex.Api.Communications.Infrastructure.Storage.FirebaseStorageService>();
+}
 builder.Services.AddScoped<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanup>();
 // En Lambda lo hace el job correspondiente ("import-cleanup").
 if (!LambdaHosting.IsLambda)

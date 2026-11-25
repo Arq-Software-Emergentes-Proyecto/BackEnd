@@ -51,8 +51,41 @@ Globals:
         FirebaseStorage__Bucket: !Ref FirebaseStorageBucket
         Cors__AllowedOrigins: !Ref FrontendOrigins
         MercadoPago__FrontendBaseUrl: !Ref FrontendBaseUrl
+        BF_FILES_BUCKET: !Ref FilesBucket
 
 Resources:
+  # Documentos del condominio (Importación / contexto IA), privado, URLs de 15 min.
+  FilesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: !Split [',', !Ref FrontendOrigins]
+            AllowedMethods: [PUT, GET, HEAD]
+            AllowedHeaders: ['*']
+            ExposedHeaders: [ETag]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -68,6 +101,9 @@ Resources:
       Environment:
         Variables:
           BF_LAMBDA_ROLE: api
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
       DeadLetterQueue:
         Type: SQS
         TargetArn: !GetAtt FailedJobsQueue.Arn
@@ -196,6 +232,9 @@ Resources:
       Environment:
         Variables:
           BF_LAMBDA_ROLE: jobs
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
       EventInvokeConfig:
         MaximumRetryAttempts: 1
       Events:
@@ -233,3 +272,6 @@ Outputs:
   AlarmTopicArn:
     Description: Tema SNS de las alarmas.
     Value: !Ref AlarmTopic
+  FilesBucketName:
+    Description: Nombre del bucket S3 privado para documentos.
+    Value: !Ref FilesBucket
