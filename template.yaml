@@ -101,9 +101,12 @@ Resources:
       Environment:
         Variables:
           BF_LAMBDA_ROLE: api
+          BF_JOBS_FUNCTION_NAME: !Ref JobsFunction
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref FilesBucket
+        - LambdaInvokePolicy:
+            FunctionName: !Ref JobsFunction
       DeadLetterQueue:
         Type: SQS
         TargetArn: !GetAtt FailedJobsQueue.Arn
@@ -227,7 +230,7 @@ Resources:
   JobsFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Description: BuildingFex jobs (migrate, monthly-billing, import-cleanup)
+      Description: BuildingFex jobs (migrate, monthly-billing, import-cleanup, ai-index)
       Timeout: 600
       Environment:
         Variables:
@@ -249,6 +252,11 @@ Resources:
           Properties:
             ScheduleExpression: "rate(30 minutes)"
             Input: '{"job":"import-cleanup"}'
+        AiIndexSweep:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "rate(30 minutes)"
+            Input: '{"job":"ai-index"}'
 
   JobsLogGroup:
     Type: AWS::Logs::LogGroup

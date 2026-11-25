@@ -7,6 +7,8 @@ public class ImportFolder
     public string OwnerAdminId { get; private set; } = string.Empty;
     public string Name { get; private set; } = string.Empty;
     public bool IsHome { get; private set; }
+    /// <summary>Carpeta fija «Contexto IA» cuyos documentos vigentes alimentan al asistente.</summary>
+    public bool IsContext { get; private set; }
     public DateTimeOffset CreatedAt { get; set; }
 
     private ImportFolder() { }
@@ -15,7 +17,8 @@ public class ImportFolder
         string externalId,
         string ownerAdminId,
         string name,
-        bool isHome)
+        bool isHome,
+        bool isContext = false)
     {
         return new ImportFolder
         {
@@ -23,15 +26,18 @@ public class ImportFolder
             OwnerAdminId = ownerAdminId,
             Name = name,
             IsHome = isHome,
+            IsContext = isContext,
             CreatedAt = DateTimeOffset.UtcNow,
         };
     }
 
-    public void Patch(string? name, bool? isHome)
+    public void Patch(string? name, bool? isHome, bool? isContext = null)
     {
         if (name is not null)
             Name = name;
         if (isHome.HasValue)
             IsHome = isHome.Value;
+        if (isContext.HasValue)
+            IsContext = isContext.Value;
     }
 }

@@ -32,4 +32,17 @@ public class GeminiSettings
 
     /// <summary>Máximo de llamadas a Gemini por usuario (uid) en un minuto móvil (TS010).</summary>
     public int MaxRequestsPerMinute { get; set; } = 20;
+
+    /// <summary>Modelo de embeddings para Contexto IA (US042).</summary>
+    public string EmbeddingModel { get; set; } = "gemini-embedding-001";
+
+    /// <summary>Modelo efectivo de embeddings ("gemini-embedding-001" si viene vacío).</summary>
+    public string ResolvedEmbeddingModel =>
+        string.IsNullOrWhiteSpace(EmbeddingModel) ? "gemini-embedding-001" : EmbeddingModel.Trim();
+
+    /// <summary>Dimensiones de salida solicitadas para embeddings (outputDimensionality).</summary>
+    public int EmbeddingDimensions { get; set; } = 768;
+
+    /// <summary>Puntaje mínimo de relevancia (coseno o palabras clave) para usar un fragmento en el RAG.</summary>
+    public double MinRelevanceScore { get; set; } = 0.55;
 }

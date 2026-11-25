@@ -123,6 +123,11 @@ builder.Services.Configure<BuildingFex.Api.ResidentCare.Infrastructure.Configura
 builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Infrastructure.RateLimiting.GeminiRateLimiter>();
 builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemini.IGeminiClient,
     BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiClient>();
+builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemini.IGeminiEmbeddingClient,
+    BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiEmbeddingClient>();
+builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.IAiContextIndexer,
+    BuildingFex.Api.ResidentCare.Application.AiContextIndexer>();
+builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.AiContextIndexingJob>();
 builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings>(
     builder.Configuration.GetSection(BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings.SectionName));
 builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configuration.FirebaseStorageSettings>(
@@ -142,9 +147,20 @@ else
         BuildingFex.Api.Communications.Infrastructure.Storage.FirebaseStorageService>();
 }
 builder.Services.AddScoped<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanup>();
-// En Lambda lo hace el job correspondiente ("import-cleanup").
-if (!LambdaHosting.IsLambda)
+// En Lambda los trabajos en segundo plano corren vía JobsFunction ("import-cleanup", "ai-index").
+if (LambdaHosting.IsLambda)
+{
+    builder.Services.AddSingleton<Amazon.Lambda.IAmazonLambda>(_ => new Amazon.Lambda.AmazonLambdaClient());
+    builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Application.IAiContextIndexingQueue,
+        BuildingFex.Api.ResidentCare.Infrastructure.Lambda.LambdaAiContextIndexingQueue>();
+}
+else
+{
+    builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Application.IAiContextIndexingQueue,
+        BuildingFex.Api.ResidentCare.Application.AiContextIndexingQueue>();
+    builder.Services.AddHostedService<BuildingFex.Api.ResidentCare.Application.AiContextIndexingWorker>();
     builder.Services.AddHostedService<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanupWorker>();
+}
 builder.Services.AddSignalR();
 
 builder.Services.AddBuildingFexAuthentication(tokenSettings, firebaseSettings);

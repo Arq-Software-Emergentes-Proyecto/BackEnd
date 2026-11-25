@@ -8,6 +8,15 @@ public static class ImportUploadStatus
     public const string Confirmed = "confirmed";
 }
 
+public static class ImportIndexingStatus
+{
+    public const string None = "none";
+    public const string Pending = "pending";
+    public const string Indexing = "indexing";
+    public const string Done = "done";
+    public const string Failed = "failed";
+}
+
 /// <summary>DocumentType (Tabla 76): tipo de documento oficial.</summary>
 public static class OfficialDocumentType
 {
@@ -79,6 +88,10 @@ public class ImportUpload
     /// <summary>Documento anterior al que esta versión dejó sin vigencia (external id).</summary>
     public string? SupersedesId { get; private set; }
 
+    /// <summary>Estado de indexación RAG: none | pending | indexing | done | failed.</summary>
+    public string IndexingStatus { get; private set; } = ImportIndexingStatus.None;
+    public string? IndexingError { get; private set; }
+
     /// <summary>Vigente: confirmado y publicado.</summary>
     public bool IsCurrent =>
         UploadStatus == ImportUploadStatus.Confirmed && DocumentStatus == OfficialDocumentStatus.Published;
@@ -111,11 +124,12 @@ public class ImportUpload
             DocumentType = OfficialDocumentType.Normalize(documentType) ?? OfficialDocumentType.Other,
             DocumentStatus = OfficialDocumentStatus.PendingUpload,
             Version = 1,
+            IndexingStatus = ImportIndexingStatus.None,
         };
     }
 
     /// <summary>confirmUpload(): el binario está en Storage. Se publica de inmediato (comportamiento histórico).</summary>
-    public void Confirm()
+    public void Confirm(bool needsIndexing = false)
     {
         UploadStatus = ImportUploadStatus.Confirmed;
         if (DocumentStatus == OfficialDocumentStatus.PendingUpload)
@@ -124,6 +138,15 @@ public class ImportUpload
             PublishedAt = DateTimeOffset.UtcNow;
         }
         DownloadUrl = string.Empty;
+        IndexingStatus = needsIndexing ? ImportIndexingStatus.Pending : ImportIndexingStatus.None;
+        IndexingError = null;
+    }
+
+    public void SetIndexingStatus(string status, string? error = null)
+    {
+        IndexingStatus = string.IsNullOrWhiteSpace(status) ? ImportIndexingStatus.None : status.Trim();
+        var clean = string.IsNullOrWhiteSpace(error) ? null : error.Trim();
+        IndexingError = clean is not null && clean.Length > 1024 ? clean[..1024] : clean;
     }
 
     public void Patch(string? fileName, string? folderId)

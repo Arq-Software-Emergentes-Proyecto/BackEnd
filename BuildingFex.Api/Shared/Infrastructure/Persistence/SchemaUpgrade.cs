@@ -205,6 +205,9 @@ public static class SchemaUpgrade
         await EnsureColumnAsync(db, logger, "import_uploads", "storage_path", "VARCHAR(1024) NOT NULL DEFAULT ''", ct);
         await EnsureColumnAsync(db, logger, "import_uploads", "download_url", "LONGTEXT NULL", ct);
         await EnsureColumnAsync(db, logger, "import_uploads", "upload_status", "VARCHAR(32) NOT NULL DEFAULT 'confirmed'", ct);
+        await EnsureColumnAsync(db, logger, "import_uploads", "indexing_status", "VARCHAR(32) NOT NULL DEFAULT 'none'", ct);
+        await EnsureColumnAsync(db, logger, "import_uploads", "indexing_error", "VARCHAR(1024) NULL", ct);
+        await EnsureColumnAsync(db, logger, "import_folders", "is_context", "TINYINT(1) NOT NULL DEFAULT 0", ct);
 
         // Después de upload_status (el backfill PENDING_UPLOAD lo lee): en DBs muy antiguas la columna aún no existía.
         await ApplyOfficialDocumentsAsync(db, logger, ct);
@@ -267,6 +270,23 @@ public static class SchemaUpgrade
             await EnsureIndexAsync(db, logger, "reservations", "ux_reservations_owner_slot",
                 "CREATE UNIQUE INDEX ux_reservations_owner_slot ON reservations (owner_admin_id, slot_key)", ct);
         }
+
+        await EnsureTableAsync(db, logger, """
+            CREATE TABLE IF NOT EXISTS ai_context_chunks (
+              id INT NOT NULL AUTO_INCREMENT,
+              owner_admin_id VARCHAR(128) NOT NULL,
+              upload_external_id VARCHAR(128) NOT NULL,
+              file_name VARCHAR(512) NULL,
+              chunk_index INT NOT NULL,
+              content LONGTEXT NOT NULL,
+              embedding_json LONGTEXT NOT NULL,
+              created_at DATETIME(6) NOT NULL,
+              PRIMARY KEY (id),
+              KEY ix_ai_context_chunks_owner (owner_admin_id),
+              KEY ix_ai_context_chunks_upload (upload_external_id)
+            );
+            """, ct);
+        await EnsureColumnAsync(db, logger, "ai_context_chunks", "embedding_model", "VARCHAR(64) NOT NULL DEFAULT 'text-embedding-004'", ct);
 
         await ApplySubscriptionPaymentsAsync(db, logger, ct);
     }
