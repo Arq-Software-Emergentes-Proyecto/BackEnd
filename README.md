@@ -117,20 +117,9 @@ Al arrancar, la API aplica migraciones y siembra usuarios desde `Fronted-1/serve
 
 ## Pruebas unitarias
 
-El proyecto `BuildingFex.Api.Tests` cubre mediante pruebas unitarias puras (sin base de datos, red ni servicios externos) la lógica de negocio clave:
-- **Serverless**: detección de entorno AWS Lambda y rol de ejecución en `LambdaHosting`.
-- **Resident Care / Asistente IA**:
-  - `AnswerPolicy`: derivación sin fuentes documentales, citas, detección de emergencias y formateo de contexto.
-  - `SupportEscalate`: detección de solicitudes de residentes para hablar con administración y descarte del token `[[ESCALATE_ADMIN]]`.
-  - `QuestionRelevancePolicy`: filtrado previo sin consumo de IA para saludos (`SmallTalk`), mensajes sin contenido (`Unclear`) y preguntas del edificio (`Building`).
-  - `AiUsageQuota`: cálculo de periodos y días en hora de Lima (UTC-5) y métricas de consumo en `AiUsageSnapshot`.
-- **Incidencias**:
-  - `EscalationPolicy` e `Incident.Escalate`: regla de escalado automático tras 48 horas sin asignación e idempotencia.
-  - `GeminiIncidentTriageAdvisor.Parse`: normalización y validación estricta de la respuesta JSON del triaje asistido por IA.
-
-El workflow `.github/workflows/tests.yml` ejecuta automáticamente estas pruebas en cada Pull Request y en la rama `main` antes de cualquier despliegue.
-
-Para ejecutar las pruebas localmente:
+`BuildingFex.Api.Tests` (xUnit) cubre los componentes de IA y serverless: `AnswerPolicy`, `SupportEscalate`,
+`QuestionRelevancePolicy`, el tope de consultas (`AiUsageQuota`), `EscalationPolicy`, el parseo del triaje con IA y
+`LambdaHosting`. El workflow `.github/workflows/tests.yml` las corre en cada Pull Request.
 
 ```bash
 dotnet test buildingfex-api.sln

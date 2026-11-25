@@ -50,13 +50,15 @@ using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
-// SSM Parameter Store: /buildingfex/Seccion/Clave → Seccion:Clave.
+// AWS Lambda: secretos en appsettings.Local.json del paquete (arriba) o, si BF_SSM_PATH está definido,
+// en SSM Parameter Store (/buildingfex/Seccion/Clave → Seccion:Clave).
 if (LambdaHosting.UsesParameterStore)
     builder.Configuration.AddSystemsManager(LambdaHosting.ParameterPath!);
 RailwayHosting.ConfigureKestrelPort(builder);
 RailwayHosting.ApplySecretsFromEnvironment(builder);
 RailwayHosting.ValidateProductionSecrets(builder.Configuration, builder.Environment);
-// No hace nada fuera de Lambda.
+
+// AWS Lambda (API Gateway HTTP API) en lugar de Kestrel; no hace nada fuera de Lambda.
 if (!LambdaHosting.IsJobsFunction)
     builder.Services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
 
@@ -120,18 +122,6 @@ builder.Services.Configure<TokenSettings>(builder.Configuration.GetSection("Toke
 builder.Services.Configure<FirebaseAuthSettings>(builder.Configuration.GetSection(FirebaseAuthSettings.SectionName));
 builder.Services.Configure<BuildingFex.Api.ResidentCare.Infrastructure.Configuration.GeminiSettings>(
     builder.Configuration.GetSection(BuildingFex.Api.ResidentCare.Infrastructure.Configuration.GeminiSettings.SectionName));
-builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Infrastructure.RateLimiting.GeminiRateLimiter>();
-builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemini.IGeminiClient,
-    BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiClient>();
-builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemini.IGeminiEmbeddingClient,
-    BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiEmbeddingClient>();
-builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.IAiContextIndexer,
-    BuildingFex.Api.ResidentCare.Application.AiContextIndexer>();
-builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.IAiUsageQuota,
-    BuildingFex.Api.ResidentCare.Application.AiUsageQuota>();
-builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Infrastructure.PlanQuota.IPlanQuotaClient,
-    BuildingFex.Api.ResidentCare.Infrastructure.PlanQuota.PlanQuotaClient>();
-builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.AiContextIndexingJob>();
 builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings>(
     builder.Configuration.GetSection(BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings.SectionName));
 builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configuration.FirebaseStorageSettings>(
@@ -142,26 +132,32 @@ if (BuildingFex.Api.Communications.Infrastructure.Storage.S3StorageService.Confi
     builder.Services.AddSingleton<Amazon.S3.IAmazonS3>(_ => new Amazon.S3.AmazonS3Client());
     builder.Services.AddSingleton<BuildingFex.Api.Communications.Infrastructure.Storage.IFirebaseStorageService>(sp =>
         new BuildingFex.Api.Communications.Infrastructure.Storage.S3StorageService(
-            sp.GetRequiredService<Amazon.S3.IAmazonS3>(),
-            filesBucket));
+            sp.GetRequiredService<Amazon.S3.IAmazonS3>(), filesBucket));
 }
 else
 {
     builder.Services.AddSingleton<BuildingFex.Api.Communications.Infrastructure.Storage.IFirebaseStorageService,
         BuildingFex.Api.Communications.Infrastructure.Storage.FirebaseStorageService>();
 }
+builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Infrastructure.RateLimiting.GeminiRateLimiter>();
+builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemini.IGeminiClient, BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiClient>();
+builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemini.IGeminiEmbeddingClient, BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiEmbeddingClient>();
+builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.IAiContextIndexer, BuildingFex.Api.ResidentCare.Application.AiContextIndexer>();
+builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.IAiUsageQuota, BuildingFex.Api.ResidentCare.Application.AiUsageQuota>();
+builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Infrastructure.PlanQuota.IPlanQuotaClient, BuildingFex.Api.ResidentCare.Infrastructure.PlanQuota.PlanQuotaClient>();
+builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.AiContextIndexingJob>();
 builder.Services.AddScoped<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanup>();
-// En Lambda los trabajos en segundo plano corren vía JobsFunction ("import-cleanup", "ai-index").
 if (LambdaHosting.IsLambda)
 {
+    // Lambda congela el proceso entre invocaciones: nada de BackgroundService. La función de jobs
+    // (EventBridge Scheduler + invocación asíncrona) hace ese trabajo.
     builder.Services.AddSingleton<Amazon.Lambda.IAmazonLambda>(_ => new Amazon.Lambda.AmazonLambdaClient());
     builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Application.IAiContextIndexingQueue,
         BuildingFex.Api.ResidentCare.Infrastructure.Lambda.LambdaAiContextIndexingQueue>();
 }
 else
 {
-    builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Application.IAiContextIndexingQueue,
-        BuildingFex.Api.ResidentCare.Application.AiContextIndexingQueue>();
+    builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Application.IAiContextIndexingQueue, BuildingFex.Api.ResidentCare.Application.AiContextIndexingQueue>();
     builder.Services.AddHostedService<BuildingFex.Api.ResidentCare.Application.AiContextIndexingWorker>();
     builder.Services.AddHostedService<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanupWorker>();
 }
@@ -239,8 +235,7 @@ builder.Services.AddSingleton<BuildingFex.Api.Finances.Application.Internal.Rece
     BuildingFex.Api.Finances.Infrastructure.Pdf.SimpleReceiptPdfRenderer>();
 builder.Services.AddScoped<BuildingFex.Api.Finances.Application.Internal.ReceiptDocuments.IReceiptDocumentService,
     BuildingFex.Api.Finances.Application.Internal.ReceiptDocuments.ReceiptDocumentService>();
-// RF021 / RNF011: facturación mensual automática (idempotente, diaria).
-// En Lambda lo hace el job correspondiente ("monthly-billing").
+// RF021 / RNF011: facturación mensual automática (idempotente, diaria). En Lambda: job "monthly-billing".
 if (!LambdaHosting.IsLambda)
     builder.Services.AddHostedService<BuildingFex.Api.Finances.Application.Internal.Billing.MonthlyBillingWorker>();
 builder.Services.Configure<MercadoPagoSettings>(builder.Configuration.GetSection("MercadoPago"));
@@ -286,7 +281,7 @@ if (LambdaHosting.IsJobsFunction)
     return;
 }
 
-// En Lambda el esquema lo aplica el job "migrate" una vez por despliegue, no en cada arranque en frío.
+// En Lambda el esquema lo aplica el job "migrate" una vez por despliegue, no cada arranque en frío.
 if (!LambdaHosting.IsLambda)
     await DatabaseBootstrap.RunAsync(app.Services, builder.Configuration, app.Environment.ContentRootPath);
 
@@ -301,7 +296,7 @@ app.UseClientIpCapture();
 app.UseForwardedHeaders();
 app.UseCors("AllowFrontend");
 app.UseRateLimiter();
-// Railway y API Gateway (Lambda) terminan TLS antes de llegar a la app.
+// Railway y API Gateway terminan TLS antes de llegar a la app.
 if (!app.Environment.IsDevelopment() && !RailwayHosting.IsRailwayDeployment() && !LambdaHosting.IsLambda)
     app.UseHttpsRedirection();
 app.UseAuthentication();

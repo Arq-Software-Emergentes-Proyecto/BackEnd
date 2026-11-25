@@ -1,85 +1,63 @@
-using System.Net;
 using Amazon.S3;
 using Amazon.S3.Model;
 
 namespace BuildingFex.Api.Communications.Infrastructure.Storage;
 
 /// <summary>
-/// Acceso server-side a Amazon S3: el navegador sube y descarga con URLs prefirmadas de corta duración;
-/// el servidor solo firma, lee metadata, descarga (indexación) y borra. Bucket privado con credenciales del rol de la Lambda.
+/// Almacenamiento de archivos en Amazon S3 (despliegue en AWS). Mismo contrato que Firebase Storage:
+/// el navegador sube y descarga con URLs prefirmadas de corta duración; el servidor solo firma, lee
+/// metadata, descarga (indexación IA) y borra. El bucket es privado; las credenciales salen del rol
+/// de la Lambda. Se activa con la variable BF_FILES_BUCKET (la define template.yaml).
 /// </summary>
 public class S3StorageService(IAmazonS3 s3, string bucket) : IFirebaseStorageService
 {
     public const string BucketVariable = "BF_FILES_BUCKET";
 
-    private readonly string _bucket = (bucket ?? string.Empty).Trim();
+    public static string? ConfiguredBucket =>
+        Environment.GetEnvironmentVariable(BucketVariable) is { Length: > 0 } name ? name.Trim() : null;
 
-    /// <summary>Nombre del bucket configurado en BF_FILES_BUCKET, o null si no existe o está vacío.</summary>
-    public static string? ConfiguredBucket
-    {
-        get
-        {
-            var value = Environment.GetEnvironmentVariable(BucketVariable);
-            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-        }
-    }
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(bucket);
 
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(_bucket);
-
-    public async Task<string> CreateUploadUrlAsync(
+    public Task<string> CreateUploadUrlAsync(
         string storagePath,
         string contentType,
         long contentLength,
         TimeSpan ttl,
         CancellationToken ct = default)
     {
-        var path = RequirePath(storagePath);
         if (contentLength <= 0)
             throw new ArgumentOutOfRangeException(nameof(contentLength), "contentLength must be > 0");
 
-        var mime = string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType.Trim();
-
-        // ContentType va en la firma: S3 rechaza un PUT con otro tipo. El tamaño real se valida en GetMetadataAsync.
+        // Content-Type va en la firma: S3 rechaza el PUT si el navegador manda otro. El tamaño real se
+        // compara al confirmar (GetMetadataAsync) y el upload se borra si no coincide.
         var request = new GetPreSignedUrlRequest
         {
-            BucketName = _bucket,
-            Key = path,
+            BucketName = bucket,
+            Key = RequirePath(storagePath),
             Verb = HttpVerb.PUT,
-            ContentType = mime,
+            ContentType = string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType.Trim(),
             Expires = DateTime.UtcNow.Add(ClampTtl(ttl)),
         };
-
-        return await s3.GetPreSignedURLAsync(request);
+        return s3.GetPreSignedURLAsync(request);
     }
 
-    public async Task<string> CreateDownloadUrlAsync(
-        string storagePath,
-        TimeSpan ttl,
-        CancellationToken ct = default)
-    {
-        var path = RequirePath(storagePath);
-        var request = new GetPreSignedUrlRequest
+    public Task<string> CreateDownloadUrlAsync(string storagePath, TimeSpan ttl, CancellationToken ct = default) =>
+        s3.GetPreSignedURLAsync(new GetPreSignedUrlRequest
         {
-            BucketName = _bucket,
-            Key = path,
+            BucketName = bucket,
+            Key = RequirePath(storagePath),
             Verb = HttpVerb.GET,
             Expires = DateTime.UtcNow.Add(ClampTtl(ttl)),
-        };
+        });
 
-        return await s3.GetPreSignedURLAsync(request);
-    }
-
-    public async Task<StorageObjectMetadata?> GetMetadataAsync(
-        string storagePath,
-        CancellationToken ct = default)
+    public async Task<StorageObjectMetadata?> GetMetadataAsync(string storagePath, CancellationToken ct = default)
     {
-        var path = RequirePath(storagePath);
         try
         {
-            var response = await s3.GetObjectMetadataAsync(_bucket, path, ct);
-            return new StorageObjectMetadata(response.ContentLength, response.Headers.ContentType ?? string.Empty);
+            var meta = await s3.GetObjectMetadataAsync(bucket, RequirePath(storagePath), ct);
+            return new StorageObjectMetadata(meta.ContentLength, meta.Headers.ContentType ?? string.Empty);
         }
-        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
             return null;
         }
@@ -87,8 +65,7 @@ public class S3StorageService(IAmazonS3 s3, string bucket) : IFirebaseStorageSer
 
     public async Task<byte[]> DownloadBytesAsync(string storagePath, CancellationToken ct = default)
     {
-        var path = RequirePath(storagePath);
-        using var response = await s3.GetObjectAsync(_bucket, path, ct);
+        using var response = await s3.GetObjectAsync(bucket, RequirePath(storagePath), ct);
         await using var ms = new MemoryStream();
         await response.ResponseStream.CopyToAsync(ms, ct);
         return ms.ToArray();
@@ -96,28 +73,22 @@ public class S3StorageService(IAmazonS3 s3, string bucket) : IFirebaseStorageSer
 
     public async Task DeleteAsync(string storagePath, CancellationToken ct = default)
     {
-        var path = NormalizePath(storagePath);
+        var path = (storagePath ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(path) || !IsConfigured) return;
-
-        // S3 responde 204 aunque el objeto no exista.
-        await s3.DeleteObjectAsync(_bucket, path, ct);
+        // S3 responde 204 aunque el objeto ya no exista.
+        await s3.DeleteObjectAsync(bucket, path, ct);
     }
-
-    private static string NormalizePath(string? storagePath) =>
-        (storagePath ?? string.Empty).Trim().TrimStart('/');
 
     private static string RequirePath(string storagePath)
     {
-        var path = NormalizePath(storagePath);
+        var path = (storagePath ?? string.Empty).Trim().TrimStart('/');
         if (string.IsNullOrEmpty(path))
-            throw new ArgumentException("storage_path is required.", nameof(storagePath));
+            throw new ArgumentException("storagePath required", nameof(storagePath));
         return path;
     }
 
-    private static TimeSpan ClampTtl(TimeSpan ttl)
-    {
-        if (ttl < TimeSpan.FromMinutes(1)) return TimeSpan.FromMinutes(1);
-        if (ttl > TimeSpan.FromMinutes(15)) return TimeSpan.FromMinutes(15);
-        return ttl;
-    }
+    private static TimeSpan ClampTtl(TimeSpan ttl) =>
+        ttl < TimeSpan.FromMinutes(1) ? TimeSpan.FromMinutes(1)
+        : ttl > TimeSpan.FromMinutes(15) ? TimeSpan.FromMinutes(15)
+        : ttl;
 }

@@ -58,9 +58,9 @@ public static class RailwayHosting
         if (!string.IsNullOrWhiteSpace(firebaseProjectId))
             builder.Configuration["Firebase:ProjectId"] = firebaseProjectId;
 
-        var geminiApiKey = FirstEnv("Gemini__ApiKey", "GEMINI_API_KEY");
-        if (!string.IsNullOrWhiteSpace(geminiApiKey))
-            builder.Configuration["Gemini:ApiKey"] = geminiApiKey;
+        var geminiKey = FirstEnv("Gemini__ApiKey", "GEMINI_API_KEY");
+        if (!string.IsNullOrWhiteSpace(geminiKey))
+            builder.Configuration["Gemini:ApiKey"] = geminiKey;
 
         var geminiModel = FirstEnv("Gemini__Model", "GEMINI_MODEL");
         if (!string.IsNullOrWhiteSpace(geminiModel))
