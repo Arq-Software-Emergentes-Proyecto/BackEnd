@@ -83,6 +83,14 @@ public static class AnswerPolicy
             ? "Your building has reached this month's assistant query limit for its plan, so I can't use AI to answer. I've passed your question to the board / building administration; they will reply in this same chat."
             : "Tu edificio alcanzó el tope mensual de consultas al asistente de su plan, así que no puedo usar la IA para responder. Derivé tu consulta a la junta / administración; te responderán en este mismo chat.";
 
+    /// <summary>US045: tope diario de consultas a la IA por residente.</summary>
+    public const int ResidentDailyAiQueries = 15;
+
+    public static string ResidentDailyLimitMessage(string locale, int limit) =>
+        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
+            ? $"You've reached today's limit of {limit} assistant queries. Come back tomorrow; if it's urgent, please contact the building administration directly."
+            : $"Llegaste al límite de {limit} consultas al asistente por hoy. Vuelve mañana; si es urgente, comunícate directamente con la administración del edificio.";
+
     public static string EmergencyMessage(string locale) =>
         locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
             ? "If this is an emergency, call emergency services now (Peru: firefighters 116, police 105, SAMU 106) and alert the building staff. I've also passed your message to the building administration."

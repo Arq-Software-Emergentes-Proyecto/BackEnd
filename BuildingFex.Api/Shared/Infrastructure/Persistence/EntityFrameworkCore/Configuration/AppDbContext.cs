@@ -128,6 +128,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(u => u.OwnerAdminId).HasMaxLength(128).IsRequired();
             entity.Property(u => u.Period).HasMaxLength(7).IsRequired();
             entity.Property(u => u.QueryCount).IsRequired();
+            entity.Property(u => u.FilteredCount).HasDefaultValue(0);
             entity.HasIndex(u => new { u.OwnerAdminId, u.Period }).IsUnique();
         });
 

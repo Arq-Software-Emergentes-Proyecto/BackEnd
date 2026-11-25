@@ -135,6 +135,8 @@ public class SupportController(
             used = usage.Used,
             cap = usage.Cap,
             remaining = usage.Remaining,
+            filtered = usage.Filtered,
+            residentDailyLimit = AnswerPolicy.ResidentDailyAiQueries,
             capReached = usage.CapReached,
             planId = tenantAdmin.SubscriptionPlanId,
             effectivePlanId = BuildingFex.Api.Billing.Domain.Model.SubscriptionPlans.EffectivePlanId(
@@ -447,6 +449,24 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
+        // US045: saludos y temas ajenos se responden sin IA, sin gastar el tope ni derivar.
+        var scope = QuestionRelevancePolicy.Classify(body);
+        if (scope != QuestionScope.Building)
+        {
+            var fixedReply = scope switch
+            {
+                QuestionScope.SmallTalk => QuestionRelevancePolicy.SmallTalkMessage(locale, body),
+                QuestionScope.OffTopic => QuestionRelevancePolicy.OffTopicMessage(locale),
+                _ => QuestionRelevancePolicy.UnclearMessage(locale),
+            };
+            AddResidentMessage(chat, actor, body, askedAt);
+            chat.AddMessage(Sender.Assistant, fixedReply);
+            chat.MarkAnswered();
+            await db.SaveChangesAsync(ct);
+            await aiQuota.RecordFilteredAsync(actor.Caller.BillingAdmin.ExternalId, ct);
+            return await RespondAsync(chat, ct);
+        }
+
         // TS010: tope de llamadas a Gemini por residente; el mensaje no se guarda, así el reintento no duplica.
         if (!rateLimiter.TryAcquire(actor.ExternalId))
         {
@@ -483,6 +503,19 @@ public class SupportController(
             });
         }
 
+        // US045: límite diario por residente; si se alcanzó, se devuelve la reserva mensual.
+        var dailyReservation = await aiQuota.TryConsumeResidentDailyAsync(
+            chat.OwnerAdminId, actor.ExternalId, AnswerPolicy.ResidentDailyAiQueries, ct);
+        if (dailyReservation is null)
+        {
+            await aiQuota.ReleaseAsync(reservation, ct);
+            AddResidentMessage(chat, actor, body, askedAt);
+            chat.AddMessage(Sender.Assistant, AnswerPolicy.ResidentDailyLimitMessage(locale, AnswerPolicy.ResidentDailyAiQueries));
+            chat.MarkAnswered();
+            await db.SaveChangesAsync(ct);
+            return await RespondAsync(chat, ct);
+        }
+
         // Si la IA no llega a responder, la consulta reservada se devuelve.
         var consumed = false;
         try
@@ -505,6 +538,7 @@ public class SupportController(
             if (AnswerPolicy.MustDerive(sources))
             {
                 await aiQuota.ReleaseAsync(reservation, ct);
+                await aiQuota.ReleaseResidentDailyAsync(dailyReservation, ct);
                 consumed = true;
                 AddResidentMessage(chat, actor, body, askedAt);
                 chat.AddMessage(Sender.Assistant, AnswerPolicy.NoDocumentaryBasisMessage(locale));
@@ -524,6 +558,7 @@ public class SupportController(
             catch (GeminiException ex)
             {
                 await aiQuota.ReleaseAsync(reservation, ct);
+                await aiQuota.ReleaseResidentDailyAsync(dailyReservation, ct);
                 consumed = true;
                 logger.LogWarning(ex, "Gemini unavailable ({Code}) for chat {ChatId}", ex.Code, chat.ExternalId);
                 return AssistantUnavailable(ex, locale);
@@ -549,7 +584,11 @@ public class SupportController(
         }
         catch
         {
-            if (!consumed) await aiQuota.ReleaseAsync(reservation, CancellationToken.None);
+            if (!consumed)
+            {
+                await aiQuota.ReleaseAsync(reservation, CancellationToken.None);
+                await aiQuota.ReleaseResidentDailyAsync(dailyReservation, CancellationToken.None);
+            }
 
             throw;
         }

@@ -13,6 +13,9 @@ public class AiUsage
     public string Period { get; private set; } = string.Empty;
 
     public int QueryCount { get; private set; }
+
+    /// <summary>US045: mensajes respondidos sin IA (saludos, temas ajenos) en el periodo; no gastan el tope.</summary>
+    public int FilteredCount { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
 
