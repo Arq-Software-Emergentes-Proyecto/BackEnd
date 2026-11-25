@@ -12,3 +12,7 @@ appsettings.Local.json
 .aws-publish/
 .aws-sam/
 samconfig.toml
+
+# Resultados de dotnet test
+TestResults/
+
