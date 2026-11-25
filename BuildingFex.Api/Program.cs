@@ -120,6 +120,7 @@ builder.Services.Configure<TokenSettings>(builder.Configuration.GetSection("Toke
 builder.Services.Configure<FirebaseAuthSettings>(builder.Configuration.GetSection(FirebaseAuthSettings.SectionName));
 builder.Services.Configure<BuildingFex.Api.ResidentCare.Infrastructure.Configuration.GeminiSettings>(
     builder.Configuration.GetSection(BuildingFex.Api.ResidentCare.Infrastructure.Configuration.GeminiSettings.SectionName));
+builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Infrastructure.RateLimiting.GeminiRateLimiter>();
 builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemini.IGeminiClient,
     BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiClient>();
 builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings>(

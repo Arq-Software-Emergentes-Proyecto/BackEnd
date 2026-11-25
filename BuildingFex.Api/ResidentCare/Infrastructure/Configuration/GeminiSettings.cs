@@ -29,4 +29,7 @@ public class GeminiSettings
 
     /// <summary>Segundos que el circuit breaker permanece abierto (falla rápido sin llamar).</summary>
     public int CircuitBreakerOpenSeconds { get; set; } = 30;
+
+    /// <summary>Máximo de llamadas a Gemini por usuario (uid) en un minuto móvil (TS010).</summary>
+    public int MaxRequestsPerMinute { get; set; } = 20;
 }
