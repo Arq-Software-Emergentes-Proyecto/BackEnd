@@ -72,6 +72,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.AuthorRole).HasMaxLength(32).IsRequired();
             entity.Property(m => m.Body).HasColumnType("LONGTEXT").IsRequired();
             entity.Property(m => m.AuthorName).HasMaxLength(256);
+            entity.Property(m => m.CitedDocumentId).HasMaxLength(128);
+            entity.Property(m => m.CitedSource).HasMaxLength(512);
             entity.HasIndex(m => m.ChatId);
             entity.HasIndex(m => m.CreatedAt);
         });

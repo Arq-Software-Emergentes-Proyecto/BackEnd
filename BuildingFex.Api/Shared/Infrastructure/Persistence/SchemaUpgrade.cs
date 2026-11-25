@@ -162,6 +162,8 @@ public static class SchemaUpgrade
             """, ct);
 
         await MigrateSupportMessagesFromJsonAsync(db, logger, ct);
+        await EnsureColumnAsync(db, logger, "support_messages", "cited_document_id", "VARCHAR(128) NULL", ct);
+        await EnsureColumnAsync(db, logger, "support_messages", "cited_source", "VARCHAR(512) NULL", ct);
 
         // IAM: cuentas de edificio del plan Portafolio, tipo de cuenta (administración o junta) y miembros.
         await EnsureColumnAsync(db, logger, "users", "parent_admin_id", "INT NULL", ct);

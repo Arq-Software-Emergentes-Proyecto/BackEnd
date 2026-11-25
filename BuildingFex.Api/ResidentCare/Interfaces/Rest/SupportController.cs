@@ -421,7 +421,7 @@ public class SupportController(
         }
 
         var sources = docSources.Concat(AppUsageGuide.Match(retrievalQuery, locale)).ToList();
-        var history = BuildHistory(chat, body);
+        var history = BuildHistory(chat, body, locale);
         var prompt = ResidentAssistantPrompt.Build(locale, actor.Name, AnswerPolicy.BuildContext(sources));
 
         string reply;
@@ -436,8 +436,14 @@ public class SupportController(
         }
 
         AddResidentMessage(chat, actor, body, askedAt);
-        var assistantText = string.IsNullOrWhiteSpace(reply) ? AnswerPolicy.NoDocumentaryBasisMessage(locale) : reply.Trim();
-        chat.AddMessage(SenderRoles.Assistant, assistantText);
+        var answer = AnswerPolicy.ToAnswer(reply, sources);
+        var hasText = !string.IsNullOrWhiteSpace(answer.Text);
+        var assistantText = hasText ? answer.Text : AnswerPolicy.NoDocumentaryBasisMessage(locale);
+        chat.AddMessage(
+            SenderRoles.Assistant,
+            assistantText,
+            citedDocumentId: hasText && answer.Grounded ? answer.SourceDocumentId : null,
+            citedSource: hasText && answer.Grounded ? answer.SourceName : null);
         chat.MarkAnswered();
         await TrySummarizeTitleAsync(chat, actor, locale, ct);
         await db.SaveChangesAsync(ct);
@@ -456,8 +462,8 @@ public class SupportController(
         return string.IsNullOrEmpty(previous) ? body : $"{previous}\n{body}";
     }
 
-    /// <summary>TS008: solo los mensajes de esta conversación (del mismo residente), últimos N turnos.</summary>
-    private static List<GeminiTurn> BuildHistory(SupportChat chat, string body)
+    /// <summary>TS008 / US043: solo los mensajes de esta conversación (del mismo residente), últimos N turnos con su cita.</summary>
+    private static List<GeminiTurn> BuildHistory(SupportChat chat, string body, string locale)
     {
         var turns = chat.Messages
             .Select(m => new { Message = m, Sender = SenderRoles.FromAuthorRole(m.AuthorRole) })
@@ -467,7 +473,9 @@ public class SupportController(
             .TakeLast(MaxHistoryTurns)
             .Select(x => new GeminiTurn(
                 x.Sender == Sender.Assistant ? SenderRoles.Assistant : SenderRoles.ResidentInAiChat,
-                x.Message.Body))
+                x.Sender == Sender.Assistant
+                    ? AnswerPolicy.WithCitation(x.Message.Body, x.Message.CitedSource, locale)
+                    : x.Message.Body))
             .ToList();
 
         turns.Add(new GeminiTurn(SenderRoles.ResidentInAiChat, body));
@@ -645,6 +653,8 @@ public class SupportController(
             authorRole = NormalizeAuthorRole(m.AuthorRole),
             body = m.Body,
             authorName = m.AuthorName,
+            citedDocumentId = m.CitedDocumentId,
+            citedSource = m.CitedSource,
             createdAt = m.CreatedAt.ToString("o"),
         });
 
