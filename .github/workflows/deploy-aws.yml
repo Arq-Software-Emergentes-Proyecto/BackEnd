@@ -4,7 +4,7 @@
 #   - Secreto: AWS_DEPLOY_ROLE_ARN
 #   - Secretos de la app: DB_CONNECTION_STRING, JWT_SECRET (obligatorios);
 #     MP_ACCESS_TOKEN, MP_PUBLIC_KEY, MP_WEBHOOK_SECRET, FIREBASE_CREDENTIALS_JSON, GEMINI_API_KEY (opcionales)
-#   - Variables opcionales: FRONTEND_ORIGINS, FRONTEND_BASE_URL
+#   - Variables opcionales: FRONTEND_ORIGINS, FRONTEND_BASE_URL, ALARM_EMAIL
 # Ver documentación completa en docs/DEPLOY-AWS.md.
 
 name: Deploy API to AWS
@@ -31,6 +31,7 @@ env:
   STACK_NAME: buildingfex-api
   FRONTEND_ORIGINS: ${{ vars.FRONTEND_ORIGINS || 'https://fronted-seven-opal.vercel.app' }}
   FRONTEND_BASE_URL: ${{ vars.FRONTEND_BASE_URL || 'https://fronted-seven-opal.vercel.app' }}
+  ALARM_EMAIL: ${{ vars.ALARM_EMAIL || '' }}
 
 jobs:
   deploy:
@@ -122,7 +123,8 @@ jobs:
             --no-fail-on-empty-changeset \
             --parameter-overrides \
               "FrontendOrigins=$FRONTEND_ORIGINS" \
-              "FrontendBaseUrl=$FRONTEND_BASE_URL"
+              "FrontendBaseUrl=$FRONTEND_BASE_URL" \
+              "AlarmEmail=$ALARM_EMAIL"
 
       - name: Read stack outputs
         id: stack
@@ -157,7 +159,8 @@ jobs:
             --no-fail-on-empty-changeset \
             --parameter-overrides \
               "FrontendOrigins=$FRONTEND_ORIGINS" \
-              "FrontendBaseUrl=$FRONTEND_BASE_URL"
+              "FrontendBaseUrl=$FRONTEND_BASE_URL" \
+              "AlarmEmail=$ALARM_EMAIL"
 
       - name: Migrate database
         run: |
