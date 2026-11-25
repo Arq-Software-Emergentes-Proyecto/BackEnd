@@ -9,6 +9,7 @@ using BuildingFex.Api.ResidentCare.Application;
 using BuildingFex.Api.ResidentCare.Domain;
 using BuildingFex.Api.ResidentCare.Domain.Model.Aggregates;
 using BuildingFex.Api.ResidentCare.Domain.Model.ValueObjects;
+using BuildingFex.Api.ResidentCare.Domain.Services;
 using BuildingFex.Api.ResidentCare.Infrastructure.Gemini;
 using BuildingFex.Api.ResidentCare.Infrastructure.RateLimiting;
 using BuildingFex.Api.ResidentCare.Interfaces.Hubs;
@@ -34,6 +35,7 @@ public class SupportController(
     IGeminiClient gemini,
     GeminiRateLimiter rateLimiter,
     IHubContext<SupportHub> hub,
+    IAiContextIndexer contextIndexer,
     IIncidentCommandService incidentCommands,
     ILogger<SupportController> logger) : TenantScopedControllerBase
 {
@@ -406,8 +408,21 @@ public class SupportController(
             });
         }
 
+        var retrievalQuery = BuildRetrievalQuery(chat, body);
+        IReadOnlyList<KnowledgeSource> docSources;
+        try
+        {
+            docSources = await contextIndexer.RetrieveAsync(chat.OwnerAdminId, retrievalQuery, topK: 5, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "RAG retrieve failed");
+            docSources = [];
+        }
+
+        var sources = docSources.Concat(AppUsageGuide.Match(retrievalQuery, locale)).ToList();
         var history = BuildHistory(chat, body);
-        var prompt = ResidentAssistantPrompt.Build(locale, actor.Name);
+        var prompt = ResidentAssistantPrompt.Build(locale, actor.Name, AnswerPolicy.BuildContext(sources));
 
         string reply;
         try
@@ -421,12 +436,24 @@ public class SupportController(
         }
 
         AddResidentMessage(chat, actor, body, askedAt);
-        var assistantText = string.IsNullOrWhiteSpace(reply) ? EmptyReplyMessage(locale) : reply.Trim();
+        var assistantText = string.IsNullOrWhiteSpace(reply) ? AnswerPolicy.NoDocumentaryBasisMessage(locale) : reply.Trim();
         chat.AddMessage(SenderRoles.Assistant, assistantText);
         chat.MarkAnswered();
         await TrySummarizeTitleAsync(chat, actor, locale, ct);
         await db.SaveChangesAsync(ct);
         return await RespondAsync(chat, ct);
+    }
+
+    private static string BuildRetrievalQuery(SupportChat chat, string body)
+    {
+        var previous = chat.Messages
+            .Where(m => SenderRoles.FromAuthorRole(m.AuthorRole) == Sender.Resident)
+            .OrderByDescending(m => m.CreatedAt)
+            .ThenByDescending(m => m.Id)
+            .Select(m => m.Body.Trim())
+            .FirstOrDefault(b => b.Length > 0);
+
+        return string.IsNullOrEmpty(previous) ? body : $"{previous}\n{body}";
     }
 
     /// <summary>TS008: solo los mensajes de esta conversación (del mismo residente), últimos N turnos.</summary>
@@ -478,11 +505,6 @@ public class SupportController(
             message,
         });
     }
-
-    private static string EmptyReplyMessage(string locale) =>
-        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
-            ? "I couldn't generate an answer. Please rephrase your question."
-            : "No pude generar una respuesta. Reformula tu pregunta, por favor.";
 
     private async Task TrySummarizeTitleAsync(SupportChat chat, Actor actor, string locale, CancellationToken ct)
     {

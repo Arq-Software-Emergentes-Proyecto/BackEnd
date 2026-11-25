@@ -99,6 +99,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(u => u.DocumentStatus).HasMaxLength(20).IsRequired().HasDefaultValue(OfficialDocumentStatus.Published);
             entity.Property(u => u.SupersedesId).HasMaxLength(128);
             entity.HasIndex(u => new { u.OwnerAdminId, u.DocumentStatus }).HasDatabaseName("ix_import_uploads_owner_document_status");
+            entity.Property(u => u.IndexingStatus).HasMaxLength(32).IsRequired().HasDefaultValue(ImportIndexingStatus.None);
+            entity.HasIndex(u => u.IndexingStatus);
+            entity.Property(u => u.IndexingError).HasMaxLength(1024);
         });
 
         builder.Entity<ImportFolder>(entity =>
@@ -111,6 +114,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(f => f.OwnerAdminId).HasMaxLength(128).IsRequired();
             entity.Property(f => f.Name).HasMaxLength(256);
             entity.Property(f => f.IsHome);
+            entity.Property(f => f.IsContext);
+        });
+
+        builder.Entity<AiContextChunk>(entity =>
+        {
+            entity.ToTable("ai_context_chunks");
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Id).ValueGeneratedOnAdd();
+            entity.Property(c => c.OwnerAdminId).HasMaxLength(128).IsRequired();
+            entity.HasIndex(c => c.OwnerAdminId).HasDatabaseName("ix_ai_context_chunks_owner");
+            entity.Property(c => c.UploadExternalId).HasMaxLength(128).IsRequired();
+            entity.HasIndex(c => c.UploadExternalId).HasDatabaseName("ix_ai_context_chunks_upload");
+            entity.Property(c => c.FileName).HasMaxLength(512);
+            entity.Property(c => c.Content).HasColumnType("LONGTEXT").IsRequired();
+            entity.Property(c => c.EmbeddingJson).HasColumnType("LONGTEXT").IsRequired();
+            entity.Property(c => c.EmbeddingModel).HasMaxLength(64).IsRequired().HasDefaultValue(AiContextChunk.LegacyEmbeddingModel);
         });
 
         // Team (5.8): team_workers + maintenance_tasks + shifts

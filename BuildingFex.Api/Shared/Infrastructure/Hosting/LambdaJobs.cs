@@ -4,12 +4,14 @@ using Amazon.Lambda.RuntimeSupport;
 using Amazon.Lambda.Serialization.SystemTextJson;
 using BuildingFex.Api.Communications.Infrastructure;
 using BuildingFex.Api.Finances.Application.Internal.Billing;
+using BuildingFex.Api.ResidentCare.Application;
 
 namespace BuildingFex.Api.Shared.Infrastructure.Hosting;
 
-/// <summary>Evento de entrada para invocar un job periódico en Lambda.</summary>
+/// <summary>Evento de entrada para invocar un job periódico o asíncrono en Lambda.</summary>
 public sealed record LambdaJobRequest(
-    [property: JsonPropertyName("job")] string? Job);
+    [property: JsonPropertyName("job")] string? Job,
+    [property: JsonPropertyName("uploadId")] string? UploadId = null);
 
 /// <summary>Resultado de la ejecución de un job periódico en Lambda.</summary>
 public sealed record LambdaJobResult(
@@ -22,6 +24,7 @@ public sealed record LambdaJobResult(
 /// - "migrate": aplica esquema y seed tras cada despliegue.
 /// - "monthly-billing": generación automática de recibos diarios (06:15 Lima).
 /// - "import-cleanup": limpieza periódica de cargas huérfanas cada 30 minutos.
+/// - "ai-index": indexa un upload específico (uploadId) o barre pendientes/obsoletos cada 30 minutos.
 /// </summary>
 public static class LambdaJobs
 {
@@ -73,6 +76,39 @@ public static class LambdaJobs
                 logger.LogInformation(
                     "Lambda job {Job} completed: {Deleted} orphan upload(s) deleted",
                     job, processed);
+                return new LambdaJobResult(job, processed);
+            }
+            case "ai-index":
+            {
+                IReadOnlyList<string> ids;
+                if (!string.IsNullOrWhiteSpace(request?.UploadId))
+                {
+                    ids = [request.UploadId.Trim()];
+                }
+                else
+                {
+                    await using var scanScope = app.Services.CreateAsyncScope();
+                    var scanJob = scanScope.ServiceProvider.GetRequiredService<AiContextIndexingJob>();
+                    ids = await scanJob.FindWorkAsync(includePending: true, ct);
+                }
+
+                var processed = 0;
+                foreach (var uploadId in ids)
+                {
+                    try
+                    {
+                        await using var itemScope = app.Services.CreateAsyncScope();
+                        var itemJob = itemScope.ServiceProvider.GetRequiredService<AiContextIndexingJob>();
+                        await itemJob.ProcessAsync(uploadId, ct);
+                        processed++;
+                    }
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
+                    {
+                        logger.LogWarning(ex, "Lambda job {Job} failed for {UploadId}", job, uploadId);
+                    }
+                }
+
+                logger.LogInformation("Lambda job {Job} completed: {Processed} upload(s) processed", job, processed);
                 return new LambdaJobResult(job, processed);
             }
             default:

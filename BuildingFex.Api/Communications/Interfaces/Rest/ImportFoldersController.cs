@@ -40,7 +40,8 @@ public class ImportFoldersController(
             body.Id ?? $"folder-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
             admin,
             body.Name ?? "Carpeta",
-            body.IsHome ?? false);
+            body.IsHome ?? false,
+            body.IsContext ?? false);
 
         db.Set<ImportFolder>().Add(folder);
         await db.SaveChangesAsync(ct);
@@ -57,9 +58,11 @@ public class ImportFoldersController(
         if (folder is null) return NotFound();
 
         if (folder.IsHome)
-            folder.Patch("Home", true);
+            folder.Patch("Home", true, folder.IsContext);
+        else if (folder.IsContext)
+            folder.Patch("Contexto IA", folder.IsHome, true);
         else
-            folder.Patch(body.Name, body.IsHome);
+            folder.Patch(body.Name, body.IsHome, body.IsContext);
 
         await db.SaveChangesAsync(ct);
         return Ok(Map(folder));
@@ -75,6 +78,8 @@ public class ImportFoldersController(
         if (folder is null) return NotFound();
         if (folder.IsHome)
             return BadRequest(new { code = "HOME_FOLDER_PROTECTED", message = "No se puede eliminar Home." });
+        if (folder.IsContext)
+            return BadRequest(new { code = "CONTEXT_FOLDER_PROTECTED", message = "No se puede eliminar Contexto IA." });
 
         db.Set<ImportFolder>().Remove(folder);
         await db.SaveChangesAsync(ct);
@@ -107,6 +112,7 @@ public class ImportFoldersController(
         id = f.ExternalId,
         name = f.Name,
         isHome = f.IsHome,
+        isContext = f.IsContext,
         createdAt = f.CreatedAt.ToString("o"),
         ownerAdminId = f.OwnerAdminId,
     };
@@ -117,10 +123,12 @@ public class CreateFolderBody
     public string? Id { get; set; }
     public string? Name { get; set; }
     public bool? IsHome { get; set; }
+    public bool? IsContext { get; set; }
 }
 
 public class PatchFolderBody
 {
     public string? Name { get; set; }
     public bool? IsHome { get; set; }
+    public bool? IsContext { get; set; }
 }

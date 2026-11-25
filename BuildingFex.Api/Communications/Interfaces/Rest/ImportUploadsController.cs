@@ -3,6 +3,7 @@ using BuildingFex.Api.Iam.Domain.Repositories;
 using BuildingFex.Api.Communications.Domain.Model.Aggregates;
 using BuildingFex.Api.Communications.Infrastructure.Configuration;
 using BuildingFex.Api.Communications.Infrastructure.Storage;
+using BuildingFex.Api.ResidentCare.Application;
 using BuildingFex.Api.Shared.Infrastructure.Persistence.EntityFrameworkCore.Configuration;
 using BuildingFex.Api.Iam.Infrastructure.Authorization;
 using Microsoft.AspNetCore.Authorization;
@@ -14,7 +15,7 @@ namespace BuildingFex.Api.Communications.Interfaces.Rest;
 
 /// <summary>
 /// Uploads de Import — solo admin.
-/// Flujo: signed-url (valida límites) → PUT a Storage → confirm.
+/// Flujo: signed-url (valida límites) → PUT a Storage → confirm → indexado asíncrono opcional.
 /// </summary>
 [ApiController]
 [Route("api/v1/import/uploads")]
@@ -23,6 +24,8 @@ public class ImportUploadsController(
     AppDbContext db,
     IUserRepository users,
     IFirebaseStorageService storage,
+    IAiContextIndexingQueue queue,
+    IAiContextIndexer contextIndexer,
     IOptions<ImportSettings> options) : ControllerBase
 {
     /// <summary>Filtros opcionales: documentStatus (PUBLISHED|SUPERSEDED|ARCHIVED), documentType, current=true.</summary>
@@ -180,8 +183,12 @@ public class ImportUploadsController(
             });
         }
 
-        upload.Confirm();
+        var needsIndex = await IsContextFolderAsync(admin, upload.FolderId, ct);
+        upload.Confirm(needsIndex);
         await db.SaveChangesAsync(ct);
+
+        if (needsIndex)
+            await queue.EnqueueAsync(upload.ExternalId, ct);
 
         return Ok(Map(upload));
     }
@@ -243,8 +250,34 @@ public class ImportUploadsController(
             upload.SetDocumentType(body.DocumentType);
         }
 
+        var previousFolderId = upload.FolderId;
         upload.Patch(body.FileName, body.FolderId);
+        var folderChanged = !string.Equals(previousFolderId, upload.FolderId, StringComparison.Ordinal);
+        var shouldEnqueue = false;
+
+        if (folderChanged)
+        {
+            var inContext = await IsContextFolderAsync(admin, upload.FolderId, ct);
+            if (inContext && upload.IsCurrent)
+            {
+                upload.SetIndexingStatus(ImportIndexingStatus.Pending);
+                shouldEnqueue = true;
+            }
+            else
+            {
+                upload.SetIndexingStatus(ImportIndexingStatus.None);
+            }
+        }
+
         await db.SaveChangesAsync(ct);
+
+        if (folderChanged)
+        {
+            if (shouldEnqueue)
+                await queue.EnqueueAsync(upload.ExternalId, ct);
+            else
+                await contextIndexer.RemoveUploadAsync(upload.ExternalId, ct);
+        }
 
         return Ok(Map(upload));
     }
@@ -278,9 +311,27 @@ public class ImportUploadsController(
                 return BadRequest(new { code = "NOT_CONFIRMED", message = "El documento a reemplazar no está confirmado." });
         }
 
+        var wasCurrent = upload.IsCurrent;
         upload.Publish(previous, body?.DocumentType);
-        previous?.Supersede();
+        if (previous is not null)
+        {
+            previous.Supersede();
+            previous.SetIndexingStatus(ImportIndexingStatus.None);
+        }
+
+        var shouldEnqueue = false;
+        if (!wasCurrent && await IsContextFolderAsync(admin, upload.FolderId, ct))
+        {
+            upload.SetIndexingStatus(ImportIndexingStatus.Pending);
+            shouldEnqueue = true;
+        }
+
         await db.SaveChangesAsync(ct);
+
+        if (previous is not null)
+            await contextIndexer.RemoveUploadAsync(previous.ExternalId, ct);
+        if (shouldEnqueue)
+            await queue.EnqueueAsync(upload.ExternalId, ct);
 
         return Ok(new
         {
@@ -302,7 +353,9 @@ public class ImportUploadsController(
             return BadRequest(new { code = "NOT_CONFIRMED", message = "Confirma la subida primero." });
 
         upload.Archive();
+        upload.SetIndexingStatus(ImportIndexingStatus.None);
         await db.SaveChangesAsync(ct);
+        await contextIndexer.RemoveUploadAsync(upload.ExternalId, ct);
 
         return Ok(Map(upload));
     }
@@ -315,6 +368,8 @@ public class ImportUploadsController(
 
         var upload = await FindUploadAsync(id, admin, ct);
         if (upload is null) return NotFound();
+
+        await contextIndexer.RemoveUploadAsync(upload.ExternalId, ct);
 
         if (!string.IsNullOrWhiteSpace(upload.StoragePath) && storage.IsConfigured)
         {
@@ -388,6 +443,19 @@ public class ImportUploadsController(
         return caller is not null && caller.IsAdmin ? caller.TenantExternalId : null;
     }
 
+    private async Task<bool> IsContextFolderAsync(string admin, string? folderId, CancellationToken ct)
+    {
+        var clean = (folderId ?? string.Empty).Trim();
+        if (clean.Length == 0) return false;
+        return await db.Set<ImportFolder>()
+            .AsNoTracking()
+            .AnyAsync(
+                f => f.OwnerAdminId == admin
+                     && f.IsContext
+                     && (f.ExternalId == clean || f.Id.ToString() == clean),
+                ct);
+    }
+
     private async Task<ImportUpload?> FindUploadAsync(string id, string owner, CancellationToken ct)
     {
         var clean = (id ?? string.Empty).Trim();
@@ -423,6 +491,8 @@ public class ImportUploadsController(
         documentStatus = u.DocumentStatus,
         supersedesId = u.SupersedesId,
         isCurrent = u.IsCurrent,
+        indexingStatus = u.IndexingStatus,
+        indexingError = u.IndexingError,
     };
 }
 

@@ -50,4 +50,5 @@ Communications/
     `POST /api/v1/import/uploads/{id}/confirm`, `GET /api/v1/import/uploads/{id}/download-url`,
     `PATCH/DELETE /api/v1/import/uploads/{id}`
 - Archivos en Firebase Storage; `ImportOrphanCleanupWorker` limpia subidas no confirmadas.
+- La carpeta fija Contexto IA alimenta el RAG de Resident Care (ver ResidentCare/README.md).
 - Frontend: `src/communications/infrastructure/importUploadsApi.js`

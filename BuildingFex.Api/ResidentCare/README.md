@@ -40,3 +40,12 @@ El cliente de Gemini (`ResidentCare/Infrastructure/Gemini/GeminiClient.cs`) prot
 - La API devuelve **503 `AI_UNAVAILABLE`** (o `GEMINI_API_KEY_MISSING`) **sin guardar el mensaje**, para que el cliente reintente sin duplicar.
 
 Configuración: `GEMINI_API_KEY` (o `Gemini__ApiKey`) y opcional `GEMINI_MODEL`. En local, en `appsettings.Local.json`; nunca en un commit.
+
+## Contexto IA (RAG)
+
+1. La carpeta fija **Contexto IA** (`isContext: true`) no puede eliminarse (`CONTEXT_FOLDER_PROTECTED`) y sus documentos vigentes alimentan al asistente.
+2. Formatos indexables: `.txt`, `.md`, `.csv`, `.json` y `.pdf` (extracción de texto por página con PdfPig).
+3. Pipeline de indexación: texto → chunks de hasta 900 caracteres (solape 120) → embeddings `gemini-embedding-001` de 768 dims → tabla `ai_context_chunks`.
+4. Recuperación por edificio (`ownerAdminId`) sobre documentos `PUBLISHED` usando similitud coseno (`≥ Gemini:MinRelevanceScore`) o respaldo por palabras clave, más la guía de uso de BuildingFex.
+
+Configuración de embeddings: misma `GEMINI_API_KEY` / `Gemini:ApiKey` (opcional `Gemini:EmbeddingModel`, `Gemini:EmbeddingDimensions`, `Gemini:MinRelevanceScore`).
