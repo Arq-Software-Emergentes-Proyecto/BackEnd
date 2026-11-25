@@ -50,9 +50,14 @@ using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
+// SSM Parameter Store: /buildingfex/Seccion/Clave → Seccion:Clave.
+if (LambdaHosting.UsesParameterStore)
+    builder.Configuration.AddSystemsManager(LambdaHosting.ParameterPath!);
 RailwayHosting.ConfigureKestrelPort(builder);
 RailwayHosting.ApplySecretsFromEnvironment(builder);
 RailwayHosting.ValidateProductionSecrets(builder.Configuration, builder.Environment);
+// No hace nada fuera de Lambda.
+builder.Services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -239,8 +244,8 @@ app.UseClientIpCapture();
 app.UseForwardedHeaders();
 app.UseCors("AllowFrontend");
 app.UseRateLimiter();
-// Railway termina TLS antes de llegar a la app.
-if (!app.Environment.IsDevelopment() && !RailwayHosting.IsRailwayDeployment())
+// Railway y API Gateway (Lambda) terminan TLS antes de llegar a la app.
+if (!app.Environment.IsDevelopment() && !RailwayHosting.IsRailwayDeployment() && !LambdaHosting.IsLambda)
     app.UseHttpsRedirection();
 app.UseAuthentication();
 // IAM: cuentas DEACTIVATED → 403 ACCOUNT_DEACTIVATED en todo request autenticado.
@@ -248,7 +253,9 @@ app.UseAccountStatusGuard();
 app.UseBoardReadOnlyGuard();
 app.UseAuthorization();
 app.MapControllers();
-app.MapHub<BuildingFex.Api.ResidentCare.Interfaces.Hubs.SupportHub>("/hubs/support");
+// API Gateway HTTP API no mantiene conexiones de SignalR: en Lambda el front usa polling.
+if (!LambdaHosting.IsLambda)
+    app.MapHub<BuildingFex.Api.ResidentCare.Interfaces.Hubs.SupportHub>("/hubs/support");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", service = "buildingfex-api" }))
     .WithTags("Health");

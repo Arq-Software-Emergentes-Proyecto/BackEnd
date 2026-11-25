@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  BuildingFex - API ASP.NET Core en Lambda detrás de API Gateway (HTTP API). Base de datos en TiDB Cloud y
+  secretos en appsettings.Local.json dentro del paquete (lo escribe .github/workflows/deploy-aws.yml desde los
+  secretos de GitHub).
+
+Parameters:
+  FrontendOrigins:
+    Type: String
+    Default: https://fronted-seven-opal.vercel.app
+    Description: Orígenes CORS permitidos, separados por coma.
+  FrontendBaseUrl:
+    Type: String
+    Default: https://fronted-seven-opal.vercel.app
+    Description: URL del front para las vueltas de Mercado Pago.
+  FirebaseProjectId:
+    Type: String
+    Default: emergentes-36306
+    Description: Proyecto de Firebase (autenticación).
+  FirebaseStorageBucket:
+    Type: String
+    Default: emergentes-36306.firebasestorage.app
+    Description: Bucket de Firebase Storage.
+
+Globals:
+  Function:
+    Runtime: dotnet10
+    Architectures: [arm64]
+    # Salida de: dotnet publish BuildingFex.Api -c Release -r linux-arm64 --self-contained false -o .aws-publish
+    CodeUri: .aws-publish/
+    Handler: BuildingFex.Api
+    MemorySize: 1024
+    Environment:
+      Variables:
+        ASPNETCORE_ENVIRONMENT: Production
+        Firebase__ProjectId: !Ref FirebaseProjectId
+        FirebaseStorage__Bucket: !Ref FirebaseStorageBucket
+        Cors__AllowedOrigins: !Ref FrontendOrigins
+        MercadoPago__FrontendBaseUrl: !Ref FrontendBaseUrl
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: BuildingFex API (ASP.NET Core)
+      Timeout: 30
+      Events:
+        Proxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiFunction}
+      RetentionInDays: 14
+
+Outputs:
+  ApiUrl:
+    Description: URL pública de la API; va en el rewrite de Vercel / VITE_API_BASE_URL.
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  ApiFunctionName:
+    Description: Nombre de la función Lambda de la API.
+    Value: !Ref ApiFunction
