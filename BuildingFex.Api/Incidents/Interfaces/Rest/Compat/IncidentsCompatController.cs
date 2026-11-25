@@ -23,6 +23,8 @@ namespace BuildingFex.Api.Incidents.Interfaces.Rest.Compat;
 /// Incidencias (compat json-server + endpoints del diseño táctico: PATCH assign / resolve).
 /// Tiempo real: reutiliza SupportHub (/hubs/support) — "incidentCreated" al grupo del admin
 /// y "incidentUpdated" al admin y al residente que reportó.
+/// Triaje con IA (plan Standard+): sugerencia automática al reportar y POST {id}/triage-suggestion para pedirla
+/// de nuevo.
 /// </summary>
 [ApiController]
 [Route("incidents")]
@@ -33,6 +35,7 @@ public class IncidentsCompatController(
     IIncidentCommandService incidentCommandService,
     IIncidentRepository incidentRepository,
     IServiceProviderRepository serviceProviderRepository,
+    IncidentTriageService triageService,
     IHubContext<SupportHub> hub,
     ILogger<IncidentsCompatController> logger) : TenantScopedControllerBase
 {
@@ -57,7 +60,7 @@ public class IncidentsCompatController(
             caller!.TenantExternalId, effectiveResidentId, status, ct);
         var providers = await ProvidersByIdAsync(caller, ct);
 
-        return Ok(incidents.Select(i => IncidentResourceAssembler.ToResource(i, ProviderFor(i, providers), false)));
+        return Ok(incidents.Select(i => IncidentResourceAssembler.ToResource(i, ProviderFor(i, providers), false, forAdmin: caller.IsAdmin)));
     }
 
     /// <summary>Detalle con historial (timeline). Residente: solo sus incidencias.</summary>
@@ -128,9 +131,56 @@ public class IncidentsCompatController(
             return Failure(result);
 
         var created = result.Value!;
+        if ((string.IsNullOrWhiteSpace(created.Category) || string.IsNullOrWhiteSpace(created.Priority))
+            && triageService.IsAvailableFor(caller.TenantAdmin))
+        {
+            // Mejor esfuerzo y con tiempo acotado: si la IA no responde, la incidencia se crea igual.
+            var triage = await triageService.SuggestAsync(
+                created.ExternalId, caller.TenantAdmin, ct, AutoTriageTimeout);
+            if (triage.Status == TriageStatus.Suggested && triage.Incident is not null)
+                created = triage.Incident;
+        }
+
         var body = await ToResourceAsync(caller, created, includeEvents: false, ct);
-        await NotifyAsync("incidentCreated", caller.TenantExternalId, created, body);
+        await NotifyAsync("incidentCreated", caller.TenantExternalId, created, AdminView(body, caller, created));
         return StatusCode(StatusCodes.Status201Created, body);
+    }
+
+    /// <summary>
+    /// Pide (o vuelve a pedir) a la IA la categoría y prioridad. 403 si el plan no incluye el triaje,
+    /// 429 si el edificio alcanzó el tope mensual de consultas, 503 si la IA no está disponible.
+    /// </summary>
+    [HttpPost("{id}/triage-suggestion")]
+    [Authorize(Policy = AuthorizationPolicies.AdminOnly)]
+    public async Task<IActionResult> SuggestTriage(string id, CancellationToken ct)
+    {
+        var (caller, error) = await ResolveTenantAsync(null, ct);
+        if (error is not null) return error;
+
+        var (_, accessError) = await FindAccessibleAsync(caller!, id, ct);
+        if (accessError is not null) return accessError;
+
+        var outcome = await triageService.SuggestAsync(id, caller!.TenantAdmin, ct);
+        return outcome.Status switch
+        {
+            TriageStatus.Suggested => await UpdatedResponseAsync(caller, Result<Incident>.Success(outcome.Incident!), ct),
+            TriageStatus.NotFound => NotFound(new { code = "INCIDENT_NOT_FOUND", message = "Incidencia no encontrada." }),
+            TriageStatus.PlanFeatureNotIncluded => StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                code = "PLAN_FEATURE_NOT_INCLUDED",
+                message = "El triaje con IA está incluido desde el plan Standard.",
+            }),
+            TriageStatus.MonthlyCapReached => StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                code = "AI_MONTHLY_CAP_REACHED",
+                message = "El edificio alcanzó el tope mensual de consultas de IA. Clasifica la incidencia manualmente.",
+            }),
+            _ => StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                code = "AI_UNAVAILABLE",
+                message = "La IA no está disponible en este momento. Intenta de nuevo o clasifica manualmente.",
+            }),
+        };
     }
 
     [HttpPut("{id}")]
@@ -260,7 +310,7 @@ public class IncidentsCompatController(
             return Failure(result);
 
         var body = await ToResourceAsync(caller, result.Value!, includeEvents: true, ct);
-        await NotifyAsync("incidentUpdated", caller.TenantExternalId, result.Value!, body);
+        await NotifyAsync("incidentUpdated", caller.TenantExternalId, result.Value!, AdminView(body, caller, result.Value!));
         return Ok(body);
     }
 
@@ -279,8 +329,27 @@ public class IncidentsCompatController(
     {
         var providers = await ProvidersByIdAsync(caller, ct);
         return IncidentResourceAssembler.ToResource(
-            incident, ProviderFor(incident, providers), includeEvents);
+            incident, ProviderFor(incident, providers), includeEvents, forAdmin: caller.IsAdmin);
     }
+
+    /// <summary>La notificación al grupo del admin lleva la sugerencia de la IA aunque la acción la haga un residente.</summary>
+    private static IncidentResource AdminView(IncidentResource body, CallerContext caller, Incident incident) =>
+        caller.IsAdmin
+            ? body
+            : IncidentResourceAssembler.ToResource(incident, null, body.Events is not null) with
+            {
+                Provider = body.Provider,
+                ProviderPhone = body.ProviderPhone,
+                ProviderSpecialty = body.ProviderSpecialty,
+            };
+
+    /// <summary>Lo que recibe el residente: sin la sugerencia de la IA ni su evento.</summary>
+    private static IncidentResource ResidentView(IncidentResource body) =>
+        body with
+        {
+            AiSuggestion = null,
+            Events = body.Events?.Where(e => e.Type != IncidentEventTypes.AiTriageSuggested).ToList(),
+        };
 
     private async Task<Dictionary<string, BuildingServiceProvider>> ProvidersByIdAsync(CallerContext caller, CancellationToken ct)
     {
@@ -301,6 +370,8 @@ public class IncidentsCompatController(
         return providers.Values.FirstOrDefault(p => string.Equals(p.Name?.Trim(), name, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static readonly TimeSpan AutoTriageTimeout = TimeSpan.FromSeconds(8);
+
     private static IncidentActor Actor(CallerContext caller) =>
         new(caller.UserExternalId, caller.User.Name, caller.User.Role);
 
@@ -312,7 +383,7 @@ public class IncidentsCompatController(
             await hub.Clients.Group(SupportHub.OwnerGroup(tenantExternalId)).SendAsync(eventName, body);
             if (eventName != "incidentCreated" && !string.IsNullOrWhiteSpace(incident.ResidentExternalId))
                 await hub.Clients.Group(SupportHub.ResidentGroup(tenantExternalId, incident.ResidentExternalId))
-                    .SendAsync(eventName, body);
+                    .SendAsync(eventName, ResidentView(body));
         }
         catch (Exception ex)
         {

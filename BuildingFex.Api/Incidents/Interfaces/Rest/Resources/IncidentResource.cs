@@ -4,6 +4,7 @@ namespace BuildingFex.Api.Incidents.Interfaces.Rest.Resources;
 /// Incidencia (JSON compat json-server). provider = nombre (compat); providerId/Phone/Specialty
 /// salen del proveedor registrado para que el residente vea los datos del técnico (US031).
 /// events solo se incluye en GET /incidents/{id} (timeline, RNF010).
+/// aiSuggestion: triaje con IA pendiente o aplicado; solo para el administrador.
 /// </summary>
 public record IncidentResource(
     string Id,
@@ -23,7 +24,15 @@ public record IncidentResource(
     string? ResolvedAt,
     string? UpdatedAt,
     string OwnerAdminId,
-    IReadOnlyList<IncidentEventResource>? Events);
+    IReadOnlyList<IncidentEventResource>? Events,
+    IncidentTriageSuggestionResource? AiSuggestion = null);
+
+public record IncidentTriageSuggestionResource(
+    string? Category,
+    string? Priority,
+    string? Reason,
+    string SuggestedAt,
+    bool Pending);
 
 public record IncidentEventResource(
     int Id,

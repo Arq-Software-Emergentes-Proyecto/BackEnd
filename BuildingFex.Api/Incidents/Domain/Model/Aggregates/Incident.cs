@@ -16,6 +16,8 @@ public class Incident : IAuditableEntity
     public const int TitleMaxLength = 200;
     public const int DescriptionMaxLength = 2000;
     public const int CommentMaxLength = 2000;
+    public const int CategoryMaxLength = 50;
+    public const int TriageReasonMaxLength = 300;
 
     private readonly List<IncidentEvent> _events = [];
 
@@ -42,6 +44,12 @@ public class Incident : IAuditableEntity
     public string? ResolutionComment { get; private set; }
     public DateTimeOffset? ResolvedAt { get; private set; }
 
+    /// <summary>Sugerencia de triaje de la IA (la confirma el administrador; no cambia Category/Priority).</summary>
+    public string? AiSuggestedCategory { get; private set; }
+    public string? AiSuggestedPriority { get; private set; }
+    public string? AiSuggestionReason { get; private set; }
+    public DateTimeOffset? AiSuggestedAt { get; private set; }
+
     /// <summary>Conversación de Resident Care desde la que se reportó (ReportarIncidente); recibe el aviso de resolución.</summary>
     public string? SourceChatId { get; private set; }
     public DateTimeOffset ReportedAt { get; private set; }
@@ -49,6 +57,11 @@ public class Incident : IAuditableEntity
     public DateTimeOffset? UpdatedAt { get; set; }
 
     public IReadOnlyCollection<IncidentEvent> Events => _events;
+
+    public bool HasPendingTriageSuggestion =>
+        AiSuggestedAt is not null
+        && (!string.Equals(AiSuggestedCategory, Category, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(AiSuggestedPriority, Priority, StringComparison.Ordinal));
 
     private Incident()
     {
@@ -230,6 +243,34 @@ public class Incident : IAuditableEntity
     {
         if (string.IsNullOrWhiteSpace(chatExternalId)) return;
         SourceChatId = chatExternalId.Trim();
+    }
+
+    /// <summary>Guarda la sugerencia de categoría y prioridad de la IA (la IA solo sugiere).</summary>
+    public void RecordTriageSuggestion(string? category, string? priority, string? reason, DateTimeOffset now)
+    {
+        var cat = string.IsNullOrWhiteSpace(category) ? null : Clip(category, CategoryMaxLength);
+        var pri = IncidentPriorities.Normalize(priority);
+        if (cat is null && pri is null) return;
+
+        AiSuggestedCategory = cat;
+        AiSuggestedPriority = pri;
+        AiSuggestionReason = string.IsNullOrWhiteSpace(reason) ? null : Clip(reason, TriageReasonMaxLength);
+        AiSuggestedAt = now;
+        _events.Add(IncidentEvent.Create(
+            IncidentEventTypes.AiTriageSuggested,
+            Status,
+            TriageSummary(cat, pri),
+            IncidentActor.Assistant,
+            now));
+        Touch();
+    }
+
+    private static string TriageSummary(string? category, string? priority)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(category)) parts.Add($"Categoría: {category}");
+        if (!string.IsNullOrWhiteSpace(priority)) parts.Add($"Prioridad: {priority}");
+        return string.Join(" · ", parts);
     }
 
     private void Touch() => UpdatedAt = DateTimeOffset.UtcNow;

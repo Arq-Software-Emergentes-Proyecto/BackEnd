@@ -209,6 +209,9 @@ builder.Services.AddScoped<IServiceProviderRepository, ServiceProviderRepository
 builder.Services.AddScoped<IIncidentCommandService, IncidentCommandService>();
 builder.Services.AddScoped<IIncidentQueryService, IncidentQueryService>();
 builder.Services.AddScoped<DbJsonIncidentSeeder>();
+builder.Services.AddScoped<BuildingFex.Api.Incidents.Application.Internal.CommandServices.IIncidentTriageAdvisor,
+    BuildingFex.Api.Incidents.Infrastructure.Triage.GeminiIncidentTriageAdvisor>();
+builder.Services.AddScoped<BuildingFex.Api.Incidents.Application.Internal.CommandServices.IncidentTriageService>();
 builder.Services.AddScoped<BuildingFex.Api.Incidents.Application.Internal.OutboundServices.IIncidentResolutionNotifier,
     BuildingFex.Api.ResidentCare.Application.IncidentResolutionNotifier>();
 

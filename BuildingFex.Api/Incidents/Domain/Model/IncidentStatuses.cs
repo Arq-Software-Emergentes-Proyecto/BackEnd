@@ -68,4 +68,35 @@ public static class IncidentEventTypes
     public const string Unassigned = "unassigned";
     public const string Resolved = "resolved";
     public const string Comment = "comment";
+    public const string AiTriageSuggested = "ai_triage_suggested";
+}
+
+/// <summary>
+/// Categorías que la IA puede sugerir. La categoría se guarda como texto libre, así que el administrador
+/// también puede escribir otra.
+/// </summary>
+public static class IncidentCategories
+{
+    public static readonly IReadOnlyList<string> Suggested =
+    [
+        "Gasfitería", "Electricidad", "Ascensores", "Seguridad", "Limpieza",
+        "Áreas comunes", "Estructura", "Convivencia", "Otros",
+    ];
+
+    /// <summary>Devuelve la categoría de la lista que coincide (sin tildes ni mayúsculas) o null.</summary>
+    public static string? Match(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var key = Fold(value);
+        return Suggested.FirstOrDefault(c => Fold(c) == key);
+    }
+
+    private static string Fold(string value)
+    {
+        var normalized = value.Trim().ToLowerInvariant().Normalize(System.Text.NormalizationForm.FormD);
+        return new string(normalized
+            .Where(ch => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch)
+                         != System.Globalization.UnicodeCategory.NonSpacingMark)
+            .ToArray());
+    }
 }

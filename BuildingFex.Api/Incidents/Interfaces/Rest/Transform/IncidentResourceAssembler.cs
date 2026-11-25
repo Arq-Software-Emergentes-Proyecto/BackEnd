@@ -1,3 +1,4 @@
+using BuildingFex.Api.Incidents.Domain.Model;
 using BuildingFex.Api.Incidents.Domain.Model.Aggregates;
 using BuildingFex.Api.Incidents.Domain.Model.Entities;
 using BuildingFex.Api.Incidents.Interfaces.Rest.Resources;
@@ -10,10 +11,12 @@ public static class IncidentResourceAssembler
 
     public static IncidentResource ToResource(Incident incident) => ToResource(incident, null, false);
 
+    /// <param name="forAdmin">false (residente): sin la sugerencia de la IA ni su evento en el historial.</param>
     public static IncidentResource ToResource(
         Incident incident,
         BuildingServiceProvider? provider,
-        bool includeEvents)
+        bool includeEvents,
+        bool forAdmin = true)
     {
         // Proveedor eliminado: se conserva el nombre guardado en la incidencia.
         return new IncidentResource(
@@ -35,7 +38,17 @@ public static class IncidentResourceAssembler
             Iso(incident.UpdatedAt),
             incident.OwnerAdmin?.ExternalId ?? string.Empty,
             includeEvents
-                ? incident.Events.OrderBy(e => e.CreatedAt).ThenBy(e => e.Id).Select(ToResource).ToList()
+                ? incident.Events
+                    .Where(e => forAdmin || e.Type != IncidentEventTypes.AiTriageSuggested)
+                    .OrderBy(e => e.CreatedAt).ThenBy(e => e.Id).Select(ToResource).ToList()
+                : null,
+            AiSuggestion: forAdmin && incident.AiSuggestedAt is not null
+                ? new IncidentTriageSuggestionResource(
+                    incident.AiSuggestedCategory,
+                    incident.AiSuggestedPriority,
+                    incident.AiSuggestionReason,
+                    Iso(incident.AiSuggestedAt)!,
+                    incident.HasPendingTriageSuggestion)
                 : null);
     }
 
