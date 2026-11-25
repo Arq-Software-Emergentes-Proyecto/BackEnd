@@ -395,7 +395,7 @@ public class SupportController(
         }
 
         var history = BuildHistory(chat, body);
-        var prompt = BasicSystemPrompt(locale);
+        var prompt = ResidentAssistantPrompt.Build(locale, actor.Name);
 
         string reply;
         try
@@ -466,11 +466,6 @@ public class SupportController(
             message,
         });
     }
-
-    private static string BasicSystemPrompt(string locale) =>
-        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
-            ? "You are the BuildingFex assistant for the residents of a condominium. Reply in English, briefly and clearly."
-            : "Eres el asistente de BuildingFex para los residentes de un condominio. Responde en español, de forma breve y clara.";
 
     private static string EmptyReplyMessage(string locale) =>
         locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
