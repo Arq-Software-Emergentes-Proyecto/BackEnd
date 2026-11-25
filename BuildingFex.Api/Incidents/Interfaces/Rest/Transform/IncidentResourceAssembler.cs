@@ -42,7 +42,9 @@ public static class IncidentResourceAssembler
                     .Where(e => forAdmin || e.Type != IncidentEventTypes.AiTriageSuggested)
                     .OrderBy(e => e.CreatedAt).ThenBy(e => e.Id).Select(ToResource).ToList()
                 : null,
-            AiSuggestion: forAdmin && incident.AiSuggestedAt is not null
+            Iso(incident.EscalatedAt),
+            incident.IsEscalationActive,
+            forAdmin && incident.AiSuggestedAt is not null
                 ? new IncidentTriageSuggestionResource(
                     incident.AiSuggestedCategory,
                     incident.AiSuggestedPriority,

@@ -55,6 +55,21 @@ public class IncidentRepository(AppDbContext context)
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<Incident>> ListEscalationCandidatesAsync(
+        DateTimeOffset reportedBefore,
+        int limit,
+        CancellationToken cancellationToken = default)
+        => await WithOwner()
+            .Include(i => i.Events)
+            .Where(i => i.Status == IncidentStatuses.Open
+                        && i.AssigneeId == null
+                        && i.Provider == null
+                        && i.EscalatedAt == null
+                        && i.ReportedAt <= reportedBefore)
+            .OrderBy(i => i.ReportedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
     public async Task<bool> AnyIncidentsAsync(CancellationToken cancellationToken = default)
         => await Context.Set<Incident>().AnyAsync(cancellationToken);
 }

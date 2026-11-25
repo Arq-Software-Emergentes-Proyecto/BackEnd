@@ -4,6 +4,7 @@ using Amazon.Lambda.RuntimeSupport;
 using Amazon.Lambda.Serialization.SystemTextJson;
 using BuildingFex.Api.Communications.Infrastructure;
 using BuildingFex.Api.Finances.Application.Internal.Billing;
+using BuildingFex.Api.Incidents.Application.Internal.CommandServices;
 using BuildingFex.Api.ResidentCare.Application;
 
 namespace BuildingFex.Api.Shared.Infrastructure.Hosting;
@@ -24,6 +25,7 @@ public sealed record LambdaJobResult(
 /// - "migrate": aplica esquema y seed tras cada despliegue.
 /// - "monthly-billing": generación automática de recibos diarios (06:15 Lima).
 /// - "import-cleanup": limpieza periódica de cargas huérfanas cada 30 minutos.
+/// - "incident-escalation": escala cada hora las incidencias abiertas sin proveedor tras 48 h.
 /// - "ai-index": indexa un upload específico (uploadId) o barre pendientes/obsoletos cada 30 minutos.
 /// </summary>
 public static class LambdaJobs
@@ -78,6 +80,14 @@ public static class LambdaJobs
                     job, processed);
                 return new LambdaJobResult(job, processed);
             }
+
+            case "incident-escalation":
+            {
+                await using var scope = app.Services.CreateAsyncScope();
+                var escalated = await scope.ServiceProvider.GetRequiredService<IncidentEscalationJob>().RunOnceAsync(ct);
+                return new LambdaJobResult(job, escalated);
+            }
+
             case "ai-index":
             {
                 IReadOnlyList<string> ids;

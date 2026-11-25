@@ -214,6 +214,10 @@ builder.Services.AddScoped<BuildingFex.Api.Incidents.Application.Internal.Comman
 builder.Services.AddScoped<BuildingFex.Api.Incidents.Application.Internal.CommandServices.IncidentTriageService>();
 builder.Services.AddScoped<BuildingFex.Api.Incidents.Application.Internal.OutboundServices.IIncidentResolutionNotifier,
     BuildingFex.Api.ResidentCare.Application.IncidentResolutionNotifier>();
+builder.Services.AddScoped<BuildingFex.Api.Incidents.Application.Internal.CommandServices.IncidentEscalationJob>();
+// Escalamiento de incidencias sin asignar (48 h). En Lambda: job "incident-escalation" cada hora.
+if (!LambdaHosting.IsLambda)
+    builder.Services.AddHostedService<BuildingFex.Api.Incidents.Application.Internal.CommandServices.IncidentEscalationWorker>();
 
 // Finances
 builder.Services.AddScoped<IFeeRepository, FeeRepository>();

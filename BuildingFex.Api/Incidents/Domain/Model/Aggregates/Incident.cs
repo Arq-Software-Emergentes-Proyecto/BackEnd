@@ -44,6 +44,9 @@ public class Incident : IAuditableEntity
     public string? ResolutionComment { get; private set; }
     public DateTimeOffset? ResolvedAt { get; private set; }
 
+    /// <summary>Momento en que <see cref="EscalationPolicy"/> la escaló por seguir sin asignar (48 h).</summary>
+    public DateTimeOffset? EscalatedAt { get; private set; }
+
     /// <summary>Sugerencia de triaje de la IA (la confirma el administrador; no cambia Category/Priority).</summary>
     public string? AiSuggestedCategory { get; private set; }
     public string? AiSuggestedPriority { get; private set; }
@@ -57,6 +60,11 @@ public class Incident : IAuditableEntity
     public DateTimeOffset? UpdatedAt { get; set; }
 
     public IReadOnlyCollection<IncidentEvent> Events => _events;
+
+    public bool IsUnassigned => AssigneeId is null && Provider is null;
+
+    /// <summary>Escalada y todavía pendiente: sigue abierta y sin proveedor.</summary>
+    public bool IsEscalationActive => EscalatedAt is not null && Status == IncidentStatuses.Open && IsUnassigned;
 
     public bool HasPendingTriageSuggestion =>
         AiSuggestedAt is not null
@@ -237,6 +245,25 @@ public class Incident : IAuditableEntity
         _events.Add(ev);
         Touch();
         return ev;
+    }
+
+    /// <summary>
+    /// escalate(): la incidencia sigue reportada y sin asignar más allá del umbral de <see cref="EscalationPolicy"/>.
+    /// Idempotente: solo se escala una vez.
+    /// </summary>
+    public bool Escalate(DateTimeOffset now)
+    {
+        if (!EscalationPolicy.MustEscalate(this, now)) return false;
+
+        EscalatedAt = now;
+        _events.Add(IncidentEvent.Create(
+            IncidentEventTypes.Escalated,
+            Status,
+            $"Sin asignar por más de {EscalationPolicy.Threshold.TotalHours:0} horas: se avisó a la administración.",
+            IncidentActor.System,
+            now));
+        Touch();
+        return true;
     }
 
     public void LinkSourceChat(string? chatExternalId)

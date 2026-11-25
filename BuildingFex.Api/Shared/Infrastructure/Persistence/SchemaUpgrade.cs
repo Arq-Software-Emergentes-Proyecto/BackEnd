@@ -419,6 +419,7 @@ public static class SchemaUpgrade
         await EnsureColumnAsync(db, logger, "incidents", "assignee_id", "VARCHAR(128) NULL", ct);
         await EnsureColumnAsync(db, logger, "incidents", "resolution_comment", "VARCHAR(2000) NULL", ct);
         await EnsureColumnAsync(db, logger, "incidents", "resolved_at", "DATETIME(6) NULL", ct);
+        await EnsureColumnAsync(db, logger, "incidents", "escalated_at", "DATETIME(6) NULL", ct);
         await EnsureColumnAsync(db, logger, "incidents", "ai_suggested_category", "VARCHAR(50) NULL", ct);
         await EnsureColumnAsync(db, logger, "incidents", "ai_suggested_priority", "VARCHAR(20) NULL", ct);
         await EnsureColumnAsync(db, logger, "incidents", "ai_suggestion_reason", "VARCHAR(300) NULL", ct);
