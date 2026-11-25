@@ -428,6 +428,25 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
+        // US044: si el residente pide a una persona, se deriva sin llamar a la IA.
+        if (SupportEscalate.ResidentWantsAdmin(body))
+        {
+            AddResidentMessage(chat, actor, body, askedAt);
+            Escalate(chat, EscalationNotice(locale));
+            await db.SaveChangesAsync(ct);
+            return await RespondAsync(chat, ct);
+        }
+
+        // US044: las emergencias no las resuelve la IA; se orienta y se deriva.
+        if (AnswerPolicy.IsEmergency(body))
+        {
+            AddResidentMessage(chat, actor, body, askedAt);
+            chat.AddMessage(Sender.Assistant, AnswerPolicy.EmergencyMessage(locale));
+            Escalate(chat, notice: null);
+            await db.SaveChangesAsync(ct);
+            return await RespondAsync(chat, ct);
+        }
+
         // TS010: tope de llamadas a Gemini por residente; el mensaje no se guarda, así el reintento no duplica.
         if (!rateLimiter.TryAcquire(actor.ExternalId))
         {
@@ -445,11 +464,22 @@ public class SupportController(
         var reservation = await aiQuota.TryConsumeAsync(actor.Caller.BillingAdmin.ExternalId, cap, ct);
         if (reservation is null)
         {
+            // US044: con el tope alcanzado la consulta pasa a la administración; el chat derivado va en el body.
+            AddResidentMessage(chat, actor, body, askedAt);
+            chat.AddMessage(Sender.Assistant, AnswerPolicy.MonthlyCapReachedMessage(locale));
+            Escalate(chat, notice: null);
+            await db.SaveChangesAsync(ct);
+
+            var capPayload = ToResource(chat);
+            await NotifyAsync(chat, capPayload, ct);
+            await NotifyLinkedAsync(chat, ct);
             return StatusCode(StatusCodes.Status429TooManyRequests, new
             {
                 code = "AI_MONTHLY_CAP_REACHED",
                 message = AnswerPolicy.MonthlyCapReachedMessage(locale),
+                derived = true,
                 cap,
+                chat = capPayload,
             });
         }
 
@@ -470,6 +500,19 @@ public class SupportController(
             }
 
             var sources = docSources.Concat(AppUsageGuide.Match(retrievalQuery, locale)).ToList();
+
+            // US044: sin base documental se deriva sin llamar a la IA (no se descuenta del tope).
+            if (AnswerPolicy.MustDerive(sources))
+            {
+                await aiQuota.ReleaseAsync(reservation, ct);
+                consumed = true;
+                AddResidentMessage(chat, actor, body, askedAt);
+                chat.AddMessage(Sender.Assistant, AnswerPolicy.NoDocumentaryBasisMessage(locale));
+                Escalate(chat, notice: null);
+                await db.SaveChangesAsync(ct);
+                return await RespondAsync(chat, ct);
+            }
+
             var history = BuildHistory(chat, body, locale);
             var prompt = ResidentAssistantPrompt.Build(locale, actor.Name, AnswerPolicy.BuildContext(sources));
 
@@ -496,7 +539,10 @@ public class SupportController(
                 assistantText,
                 citedDocumentId: hasText && answer.Grounded ? answer.SourceDocumentId : null,
                 citedSource: hasText && answer.Grounded ? answer.SourceName : null);
-            chat.MarkAnswered();
+            if (answer.MustDerive)
+                Escalate(chat, notice: null);
+            else
+                chat.MarkAnswered();
             await TrySummarizeTitleAsync(chat, actor, locale, ct);
             await db.SaveChangesAsync(ct);
             return await RespondAsync(chat, ct);
@@ -617,6 +663,11 @@ public class SupportController(
             chat.SetTopic(TruncateTitle(body));
         chat.MarkPending();
     }
+
+    private static string EscalationNotice(string locale) =>
+        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
+            ? "I passed you to the board / building admin. They can reply in this same chat."
+            : "Te pasé con la junta / administración. Pueden responderte aquí mismo.";
 
     /// <summary>Deriva: crea la fila kind=admin (pendiente) con el transcript y marca el chat IA como derivado.</summary>
     private void Escalate(SupportChat aiChat, string? notice)
