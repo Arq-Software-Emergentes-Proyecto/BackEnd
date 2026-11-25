@@ -127,6 +127,10 @@ builder.Services.AddHttpClient<BuildingFex.Api.ResidentCare.Infrastructure.Gemin
     BuildingFex.Api.ResidentCare.Infrastructure.Gemini.GeminiEmbeddingClient>();
 builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.IAiContextIndexer,
     BuildingFex.Api.ResidentCare.Application.AiContextIndexer>();
+builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.IAiUsageQuota,
+    BuildingFex.Api.ResidentCare.Application.AiUsageQuota>();
+builder.Services.AddSingleton<BuildingFex.Api.ResidentCare.Infrastructure.PlanQuota.IPlanQuotaClient,
+    BuildingFex.Api.ResidentCare.Infrastructure.PlanQuota.PlanQuotaClient>();
 builder.Services.AddScoped<BuildingFex.Api.ResidentCare.Application.AiContextIndexingJob>();
 builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings>(
     builder.Configuration.GetSection(BuildingFex.Api.Communications.Infrastructure.Configuration.ImportSettings.SectionName));

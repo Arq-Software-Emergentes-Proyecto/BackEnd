@@ -41,6 +41,23 @@ El cliente de Gemini (`ResidentCare/Infrastructure/Gemini/GeminiClient.cs`) prot
 
 Configuración: `GEMINI_API_KEY` (o `Gemini__ApiKey`) y opcional `GEMINI_MODEL`. En local, en `appsettings.Local.json`; nunca en un commit.
 
+## Tope mensual (CON11)
+
+Tabla `ai_usages` (owner_admin_id, period `yyyy-MM` en hora de Lima, query_count; única por owner + period). Cada respuesta de la IA
+consume 1 con un UPDATE condicional atómico; si al final no se usa la IA (falla del proveedor) se devuelve. Tope =
+`SubscriptionPlans.MonthlyAiQueryCap` del plan efectivo; en Portafolio se cuenta para toda la cuenta. Al alcanzarlo: 429
+`AI_MONTHLY_CAP_REACHED` y la consulta se deriva a la administración (`chat` derivado en el body). Consumo para el admin:
+`GET /api/v1/support/ai-usage`.
+
+## Derivación a la administración (US044)
+
+El chat IA se deriva (fila `kind=admin` ligada por `linked_chat_id`) cuando:
+1. el residente lo pide ("pásame con el administrador", "hablar con la junta"…): sin IA;
+2. es una emergencia (incendio, gas, inundación…): mensaje con los números de emergencia y derivación, sin IA;
+3. no hay base documental: sin IA y sin descontar del tope;
+4. el edificio alcanzó el tope mensual;
+5. el modelo responde con `[[ESCALATE_ADMIN]]` en la última línea (el marcador se quita del texto).
+
 ## Contexto IA (RAG)
 
 1. La carpeta fija **Contexto IA** (`isContext: true`) no puede eliminarse (`CONTEXT_FOLDER_PROTECTED`) y sus documentos vigentes alimentan al asistente.
