@@ -8,8 +8,8 @@ using Microsoft.Extensions.Options;
 namespace BuildingFex.Api.Communications.Infrastructure;
 
 /// <summary>
-/// Borra pending_upload huérfanos (fila + objeto Storage) tras OrphanTtlHours. Una pasada; la llama el
-/// worker cada 30 min.
+/// Borra pending_upload huérfanos (fila + objeto Storage) tras OrphanTtlHours. Una pasada; la llaman el
+/// worker periódico en local/Railway y la función de jobs ("import-cleanup") en AWS Lambda.
 /// </summary>
 public class ImportOrphanCleanup(
     AppDbContext db,
@@ -49,7 +49,10 @@ public class ImportOrphanCleanup(
     }
 }
 
-/// <summary>Corre <see cref="ImportOrphanCleanup"/> cada 30 min.</summary>
+/// <summary>
+/// Corre <see cref="ImportOrphanCleanup"/> cada 30 min en entornos con servidor continuo.
+/// En AWS Lambda no se registra: lo dispara EventBridge Scheduler hacia JobsFunction.
+/// </summary>
 public class ImportOrphanCleanupWorker(
     IServiceScopeFactory scopeFactory,
     ILogger<ImportOrphanCleanupWorker> logger) : BackgroundService

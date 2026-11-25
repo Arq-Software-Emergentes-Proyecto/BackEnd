@@ -57,7 +57,8 @@ RailwayHosting.ConfigureKestrelPort(builder);
 RailwayHosting.ApplySecretsFromEnvironment(builder);
 RailwayHosting.ValidateProductionSecrets(builder.Configuration, builder.Environment);
 // No hace nada fuera de Lambda.
-builder.Services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
+if (!LambdaHosting.IsJobsFunction)
+    builder.Services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -124,7 +125,9 @@ builder.Services.Configure<BuildingFex.Api.Communications.Infrastructure.Configu
 builder.Services.AddSingleton<BuildingFex.Api.Communications.Infrastructure.Storage.IFirebaseStorageService,
     BuildingFex.Api.Communications.Infrastructure.Storage.FirebaseStorageService>();
 builder.Services.AddScoped<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanup>();
-builder.Services.AddHostedService<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanupWorker>();
+// En Lambda lo hace el job correspondiente ("import-cleanup").
+if (!LambdaHosting.IsLambda)
+    builder.Services.AddHostedService<BuildingFex.Api.Communications.Infrastructure.ImportOrphanCleanupWorker>();
 builder.Services.AddSignalR();
 
 builder.Services.AddBuildingFexAuthentication(tokenSettings, firebaseSettings);
@@ -193,7 +196,9 @@ builder.Services.AddSingleton<BuildingFex.Api.Finances.Application.Internal.Rece
 builder.Services.AddScoped<BuildingFex.Api.Finances.Application.Internal.ReceiptDocuments.IReceiptDocumentService,
     BuildingFex.Api.Finances.Application.Internal.ReceiptDocuments.ReceiptDocumentService>();
 // RF021 / RNF011: facturación mensual automática (idempotente, diaria).
-builder.Services.AddHostedService<BuildingFex.Api.Finances.Application.Internal.Billing.MonthlyBillingWorker>();
+// En Lambda lo hace el job correspondiente ("monthly-billing").
+if (!LambdaHosting.IsLambda)
+    builder.Services.AddHostedService<BuildingFex.Api.Finances.Application.Internal.Billing.MonthlyBillingWorker>();
 builder.Services.Configure<MercadoPagoSettings>(builder.Configuration.GetSection("MercadoPago"));
 builder.Services.AddScoped<IMercadoPagoService, MercadoPagoService>();
 builder.Services.AddScoped<DbJsonFinanceSeeder>();
@@ -231,7 +236,15 @@ builder.Services.AddScoped<BuildingFex.Api.Team.Application.Internal.CommandServ
 
 var app = builder.Build();
 
-await DatabaseBootstrap.RunAsync(app.Services, builder.Configuration, app.Environment.ContentRootPath);
+if (LambdaHosting.IsJobsFunction)
+{
+    await LambdaJobs.RunAsync(app);
+    return;
+}
+
+// En Lambda el esquema lo aplica el job "migrate" una vez por despliegue, no en cada arranque en frío.
+if (!LambdaHosting.IsLambda)
+    await DatabaseBootstrap.RunAsync(app.Services, builder.Configuration, app.Environment.ContentRootPath);
 
 if (app.Environment.IsDevelopment() || RailwayHosting.IsRailwayDeployment())
 {
