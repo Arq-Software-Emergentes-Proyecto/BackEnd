@@ -10,7 +10,7 @@ namespace BuildingFex.Api.Shared.Infrastructure.Hosting;
 
 /// <summary>
 /// Esquema (EnsureCreated + ALTER/CREATE IF NOT EXISTS) y seed opcional desde db.json. Corre al arrancar en
-/// local, Railway y AWS Lambda.
+/// local y Railway; en Lambda lo corre el job "migrate".
 /// </summary>
 public static class DatabaseBootstrap
 {
