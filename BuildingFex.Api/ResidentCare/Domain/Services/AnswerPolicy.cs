@@ -57,6 +57,11 @@ public static class AnswerPolicy
             ? "I couldn't find a documentary basis in your building's current bylaws or meeting minutes to answer this, so I can't reply without guessing."
             : "No encontré una base documental en el reglamento ni en las actas vigentes de tu edificio para responder esto, así que no puedo contestarte sin adivinar.";
 
+    public static string MonthlyCapReachedMessage(string locale) =>
+        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
+            ? "Your building has reached this month's assistant query limit for its plan, so I can't use AI to answer. Try again next month or contact the building administration."
+            : "Tu edificio alcanzó el tope mensual de consultas al asistente de su plan, así que no puedo usar la IA para responder. Vuelve a intentarlo el próximo mes o contacta a la administración.";
+
     private static string? CleanCitationName(string raw)
     {
         var clean = raw.Trim().Trim('"', '\'', '«', '»', '`', '*', '_', '.', ' ');

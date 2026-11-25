@@ -11,6 +11,7 @@ using BuildingFex.Api.ResidentCare.Domain.Model.Aggregates;
 using BuildingFex.Api.ResidentCare.Domain.Model.ValueObjects;
 using BuildingFex.Api.ResidentCare.Domain.Services;
 using BuildingFex.Api.ResidentCare.Infrastructure.Gemini;
+using BuildingFex.Api.ResidentCare.Infrastructure.PlanQuota;
 using BuildingFex.Api.ResidentCare.Infrastructure.RateLimiting;
 using BuildingFex.Api.ResidentCare.Interfaces.Hubs;
 using BuildingFex.Api.Shared.Infrastructure.Persistence.EntityFrameworkCore.Configuration;
@@ -36,6 +37,8 @@ public class SupportController(
     GeminiRateLimiter rateLimiter,
     IHubContext<SupportHub> hub,
     IAiContextIndexer contextIndexer,
+    IAiUsageQuota aiQuota,
+    IPlanQuotaClient planQuota,
     IIncidentCommandService incidentCommands,
     ILogger<SupportController> logger) : TenantScopedControllerBase
 {
@@ -109,6 +112,33 @@ public class SupportController(
             answered = Count(s => s == ConversationStatus.Answered),
             closed = Count(s => s == ConversationStatus.Closed),
             total = rows.Sum(r => r.Count),
+        });
+    }
+
+    /// <summary>US041 / CON11: consumo del tope mensual de consultas al asistente.</summary>
+    [HttpGet("ai-usage")]
+    [Authorize(Policy = AuthorizationPolicies.AdminOnly)]
+    public async Task<IActionResult> AiUsage(CancellationToken ct)
+    {
+        var (actor, error) = await ResolveActorAsync(ct);
+        if (actor is null) return error!;
+
+        var tenantAdmin = actor.Caller.TenantAdmin;
+        // Portafolio: el tope es de toda la cuenta (todos sus edificios).
+        var usage = await aiQuota.GetAsync(
+            actor.Caller.BillingAdmin.ExternalId,
+            planQuota.MonthlyAiQueryCap(tenantAdmin.SubscriptionPlanId, tenantAdmin.SubscriptionPaidUntil),
+            ct);
+        return Ok(new
+        {
+            period = usage.Period,
+            used = usage.Used,
+            cap = usage.Cap,
+            remaining = usage.Remaining,
+            capReached = usage.CapReached,
+            planId = tenantAdmin.SubscriptionPlanId,
+            effectivePlanId = BuildingFex.Api.Billing.Domain.Model.SubscriptionPlans.EffectivePlanId(
+                tenantAdmin.SubscriptionPlanId, tenantAdmin.SubscriptionPaidUntil, DateTimeOffset.UtcNow),
         });
     }
 
@@ -408,46 +438,75 @@ public class SupportController(
             });
         }
 
-        var retrievalQuery = BuildRetrievalQuery(chat, body);
-        IReadOnlyList<KnowledgeSource> docSources;
+        // US041 / CON11: tope mensual del plan, contado para toda la cuenta (en Portafolio, la matriz).
+        var cap = planQuota.MonthlyAiQueryCap(
+            actor.Caller.TenantAdmin.SubscriptionPlanId,
+            actor.Caller.TenantAdmin.SubscriptionPaidUntil);
+        var reservation = await aiQuota.TryConsumeAsync(actor.Caller.BillingAdmin.ExternalId, cap, ct);
+        if (reservation is null)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                code = "AI_MONTHLY_CAP_REACHED",
+                message = AnswerPolicy.MonthlyCapReachedMessage(locale),
+                cap,
+            });
+        }
+
+        // Si la IA no llega a responder, la consulta reservada se devuelve.
+        var consumed = false;
         try
         {
-            docSources = await contextIndexer.RetrieveAsync(chat.OwnerAdminId, retrievalQuery, topK: 5, ct);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            logger.LogWarning(ex, "RAG retrieve failed");
-            docSources = [];
-        }
+            var retrievalQuery = BuildRetrievalQuery(chat, body);
+            IReadOnlyList<KnowledgeSource> docSources;
+            try
+            {
+                docSources = await contextIndexer.RetrieveAsync(chat.OwnerAdminId, retrievalQuery, topK: 5, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "RAG retrieve failed");
+                docSources = [];
+            }
 
-        var sources = docSources.Concat(AppUsageGuide.Match(retrievalQuery, locale)).ToList();
-        var history = BuildHistory(chat, body, locale);
-        var prompt = ResidentAssistantPrompt.Build(locale, actor.Name, AnswerPolicy.BuildContext(sources));
+            var sources = docSources.Concat(AppUsageGuide.Match(retrievalQuery, locale)).ToList();
+            var history = BuildHistory(chat, body, locale);
+            var prompt = ResidentAssistantPrompt.Build(locale, actor.Name, AnswerPolicy.BuildContext(sources));
 
-        string reply;
-        try
-        {
-            reply = await gemini.GenerateReplyAsync(history, prompt, ct);
-        }
-        catch (GeminiException ex)
-        {
-            logger.LogWarning(ex, "Gemini unavailable ({Code}) for chat {ChatId}", ex.Code, chat.ExternalId);
-            return AssistantUnavailable(ex, locale);
-        }
+            string reply;
+            try
+            {
+                reply = await gemini.GenerateReplyAsync(history, prompt, ct);
+            }
+            catch (GeminiException ex)
+            {
+                await aiQuota.ReleaseAsync(reservation, ct);
+                consumed = true;
+                logger.LogWarning(ex, "Gemini unavailable ({Code}) for chat {ChatId}", ex.Code, chat.ExternalId);
+                return AssistantUnavailable(ex, locale);
+            }
 
-        AddResidentMessage(chat, actor, body, askedAt);
-        var answer = AnswerPolicy.ToAnswer(reply, sources);
-        var hasText = !string.IsNullOrWhiteSpace(answer.Text);
-        var assistantText = hasText ? answer.Text : AnswerPolicy.NoDocumentaryBasisMessage(locale);
-        chat.AddMessage(
-            SenderRoles.Assistant,
-            assistantText,
-            citedDocumentId: hasText && answer.Grounded ? answer.SourceDocumentId : null,
-            citedSource: hasText && answer.Grounded ? answer.SourceName : null);
-        chat.MarkAnswered();
-        await TrySummarizeTitleAsync(chat, actor, locale, ct);
-        await db.SaveChangesAsync(ct);
-        return await RespondAsync(chat, ct);
+            consumed = true;
+            AddResidentMessage(chat, actor, body, askedAt);
+            var answer = AnswerPolicy.ToAnswer(reply, sources);
+            var hasText = !string.IsNullOrWhiteSpace(answer.Text);
+            var assistantText = hasText ? answer.Text : AnswerPolicy.NoDocumentaryBasisMessage(locale);
+            chat.AddMessage(
+                SenderRoles.Assistant,
+                assistantText,
+                citedDocumentId: hasText && answer.Grounded ? answer.SourceDocumentId : null,
+                citedSource: hasText && answer.Grounded ? answer.SourceName : null);
+            chat.MarkAnswered();
+            await TrySummarizeTitleAsync(chat, actor, locale, ct);
+            await db.SaveChangesAsync(ct);
+            return await RespondAsync(chat, ct);
+        }
+        catch
+        {
+            if (!consumed) await aiQuota.ReleaseAsync(reservation, CancellationToken.None);
+
+            throw;
+        }
     }
 
     private static string BuildRetrievalQuery(SupportChat chat, string body)

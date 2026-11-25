@@ -119,6 +119,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(f => f.IsContext);
         });
 
+        // ResidentCare: tope mensual de consultas IA por cuenta (CON11)
+        builder.Entity<AiUsage>(entity =>
+        {
+            entity.ToTable("ai_usages");
+            entity.HasKey(u => u.Id);
+            entity.Property(u => u.Id).ValueGeneratedOnAdd();
+            entity.Property(u => u.OwnerAdminId).HasMaxLength(128).IsRequired();
+            entity.Property(u => u.Period).HasMaxLength(7).IsRequired();
+            entity.Property(u => u.QueryCount).IsRequired();
+            entity.HasIndex(u => new { u.OwnerAdminId, u.Period }).IsUnique();
+        });
+
         builder.Entity<AiContextChunk>(entity =>
         {
             entity.ToTable("ai_context_chunks");

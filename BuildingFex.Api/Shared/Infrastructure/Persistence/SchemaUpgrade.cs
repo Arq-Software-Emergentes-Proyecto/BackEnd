@@ -165,6 +165,20 @@ public static class SchemaUpgrade
         await EnsureColumnAsync(db, logger, "support_messages", "cited_document_id", "VARCHAR(128) NULL", ct);
         await EnsureColumnAsync(db, logger, "support_messages", "cited_source", "VARCHAR(512) NULL", ct);
 
+        // ResidentCare (CON11): contador mensual de consultas IA por cuenta, único por (owner, periodo).
+        await EnsureTableAsync(db, logger, """
+            CREATE TABLE IF NOT EXISTS ai_usages (
+              id INT NOT NULL AUTO_INCREMENT,
+              owner_admin_id VARCHAR(128) NOT NULL,
+              period VARCHAR(7) NOT NULL,
+              query_count INT NOT NULL DEFAULT 0,
+              created_at DATETIME(6) NOT NULL,
+              updated_at DATETIME(6) NOT NULL,
+              PRIMARY KEY (id),
+              UNIQUE KEY ix_ai_usages_owner_admin_id_period (owner_admin_id, period)
+            );
+            """, ct);
+
         // IAM: cuentas de edificio del plan Portafolio, tipo de cuenta (administración o junta) y miembros.
         await EnsureColumnAsync(db, logger, "users", "parent_admin_id", "INT NULL", ct);
         await EnsureColumnAsync(db, logger, "users", "account_kind", "VARCHAR(20) NULL", ct);

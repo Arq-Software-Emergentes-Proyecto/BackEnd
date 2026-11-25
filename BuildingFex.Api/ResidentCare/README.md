@@ -41,6 +41,13 @@ El cliente de Gemini (`ResidentCare/Infrastructure/Gemini/GeminiClient.cs`) prot
 
 Configuración: `GEMINI_API_KEY` (o `Gemini__ApiKey`) y opcional `GEMINI_MODEL`. En local, en `appsettings.Local.json`; nunca en un commit.
 
+## Tope mensual (CON11)
+
+Tabla `ai_usages` (owner_admin_id, period `yyyy-MM` en hora de Lima, query_count; única por owner + period). Cada respuesta de la IA
+consume 1 con un UPDATE condicional atómico; si al final no se usa la IA (falla del proveedor) se devuelve. Tope =
+`SubscriptionPlans.MonthlyAiQueryCap` del plan efectivo; en Portafolio se cuenta para toda la cuenta. Al alcanzarlo: 429
+`AI_MONTHLY_CAP_REACHED`. Consumo para el admin: `GET /api/v1/support/ai-usage`.
+
 ## Contexto IA (RAG)
 
 1. La carpeta fija **Contexto IA** (`isContext: true`) no puede eliminarse (`CONTEXT_FOLDER_PROTECTED`) y sus documentos vigentes alimentan al asistente.
