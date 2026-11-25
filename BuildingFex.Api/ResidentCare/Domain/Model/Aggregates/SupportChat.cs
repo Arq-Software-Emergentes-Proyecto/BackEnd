@@ -145,11 +145,18 @@ public class SupportChat
     public SupportMessage AddMessage(
         string authorRole,
         string body,
-        string? authorName = null)
-        => SupportMessage.Create(this, authorRole, body, authorName);
+        string? authorName = null,
+        string? citedDocumentId = null,
+        string? citedSource = null)
+        => SupportMessage.Create(this, authorRole, body, authorName, citedDocumentId, citedSource);
 
-    public SupportMessage AddMessage(Sender sender, string body, string? authorName = null)
-        => AddMessage(SenderRoles.ToAuthorRole(sender, Kind), body, authorName);
+    public SupportMessage AddMessage(
+        Sender sender,
+        string body,
+        string? authorName = null,
+        string? citedDocumentId = null,
+        string? citedSource = null)
+        => AddMessage(SenderRoles.ToAuthorRole(sender, Kind), body, authorName, citedDocumentId, citedSource);
 
     /// <summary>Copia un mensaje de otro chat (transcript de la derivación) conservando la fecha.</summary>
     public SupportMessage CopyMessage(SupportMessage source)
@@ -157,7 +164,7 @@ public class SupportChat
         var sender = source.GetSender();
         var role = sender is null ? source.AuthorRole : SenderRoles.ToAuthorRole(sender.Value, Kind);
         return SupportMessage.Create(
-            this, role, source.Body, source.AuthorName, source.CreatedAt);
+            this, role, source.Body, source.AuthorName, source.CitedDocumentId, source.CitedSource, source.CreatedAt);
     }
 
     public void Touch() => UpdatedAt = DateTimeOffset.UtcNow;

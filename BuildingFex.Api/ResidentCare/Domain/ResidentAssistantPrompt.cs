@@ -1,12 +1,13 @@
 namespace BuildingFex.Api.ResidentCare.Domain;
 
-/// <summary>System prompt del asistente del residente (en inglés, para el modelo). Las fuentes llegan filtradas por edificio y relevancia.</summary>
+/// <summary>System prompt del asistente del residente (en inglés, para el modelo). Las fuentes llegan filtradas por edificio y relevancia, y debe citarlas.</summary>
 public static class ResidentAssistantPrompt
 {
     public static string Build(string locale, string residentName, string? sourcesBlock = null)
     {
         var english = locale.StartsWith("en", StringComparison.OrdinalIgnoreCase);
         var language = english ? "English" : "Spanish";
+        var citationLabel = english ? "Source" : "Fuente";
         var name = string.IsNullOrWhiteSpace(residentName)
             ? null
             : $"The resident's name is {residentName.Trim()}.";
@@ -21,7 +22,9 @@ public static class ResidentAssistantPrompt
             name,
             "GROUNDING (mandatory): answer ONLY using what appears in SOURCES (this building's current documents and the BuildingFex user guide). " +
             "Never use general outside knowledge or assume building rules. " +
-            "If SOURCES does not contain the answer, say in one sentence that there is no documentary basis in the building's bylaws or meeting minutes.",
+            "If SOURCES does not contain the answer, say in one sentence that there is no documentary basis in the building's bylaws or meeting minutes. " +
+            $"End every answer that has documentary basis with a final line exactly \"{citationLabel}: <file name>\", using the name shown after \"source:\" of the fragment used (the main one if several). " +
+            "When there is no documentary basis, do NOT add a source line.",
             "INCIDENTS: when the resident reports a problem (leak, breakdown, noise, damage), explain how to report it in the Incidents section using SOURCES, " +
             "plus what the building bylaws say if covered in SOURCES. " +
             "If key details are missing (location, what is happening, since when, whether it is urgent), ask ONLY for what is missing, in one short question. " +
