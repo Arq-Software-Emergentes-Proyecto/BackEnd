@@ -9,6 +9,7 @@ using BuildingFex.Api.ResidentCare.Application;
 using BuildingFex.Api.ResidentCare.Domain;
 using BuildingFex.Api.ResidentCare.Domain.Model.Aggregates;
 using BuildingFex.Api.ResidentCare.Domain.Model.ValueObjects;
+using BuildingFex.Api.ResidentCare.Infrastructure.Gemini;
 using BuildingFex.Api.ResidentCare.Interfaces.Hubs;
 using BuildingFex.Api.Shared.Infrastructure.Persistence.EntityFrameworkCore.Configuration;
 using BuildingFex.Api.Shared.Interfaces.Rest;
@@ -29,11 +30,13 @@ namespace BuildingFex.Api.ResidentCare.Interfaces.Rest;
 [Authorize(Policy = AuthorizationPolicies.AdminOrResident)]
 public class SupportController(
     AppDbContext db,
+    IGeminiClient gemini,
     IHubContext<SupportHub> hub,
     IIncidentCommandService incidentCommands,
     ILogger<SupportController> logger) : TenantScopedControllerBase
 {
     private const int MaxMessageLength = 2000;
+    private static readonly TimeSpan TitleSummaryBudget = TimeSpan.FromSeconds(3);
 
     [HttpGet("chats")]
     public async Task<IActionResult> List(
@@ -358,7 +361,10 @@ public class SupportController(
         return await RespondAsync(chat, ct);
     }
 
-    /// <summary>US032: la consulta del residente pasa a la bandeja de la administración, que responde en el mismo chat.</summary>
+    /// <summary>
+    /// Turno en el chat con el asistente. El mensaje del residente solo se guarda si hubo respuesta;
+    /// ante una falla del proveedor se responde 503 y se puede reintentar sin duplicar.
+    /// </summary>
     private async Task<IActionResult> HandleAiThreadMessageAsync(
         Actor actor,
         SupportChat chat,
@@ -372,7 +378,7 @@ public class SupportController(
 
         var askedAt = DateTimeOffset.UtcNow;
 
-        // Ya derivado: la conversación sigue con la administración.
+        // Ya derivado: la conversación sigue con la administración (sin IA).
         if (!string.IsNullOrWhiteSpace(chat.LinkedChatId))
         {
             AddResidentMessage(chat, actor, body, askedAt);
@@ -387,10 +393,98 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
+        var history = new List<GeminiTurn> { new("user", body) };
+        var prompt = BasicSystemPrompt(locale);
+
+        string reply;
+        try
+        {
+            reply = await gemini.GenerateReplyAsync(history, prompt, ct);
+        }
+        catch (GeminiException ex)
+        {
+            logger.LogWarning(ex, "Gemini unavailable ({Code}) for chat {ChatId}", ex.Code, chat.ExternalId);
+            return AssistantUnavailable(ex, locale);
+        }
+
         AddResidentMessage(chat, actor, body, askedAt);
-        Escalate(chat, notice: null);
+        var assistantText = string.IsNullOrWhiteSpace(reply) ? EmptyReplyMessage(locale) : reply.Trim();
+        chat.AddMessage(SenderRoles.Assistant, assistantText);
+        chat.MarkAnswered();
+        await TrySummarizeTitleAsync(chat, actor, locale, ct);
         await db.SaveChangesAsync(ct);
         return await RespondAsync(chat, ct);
+    }
+
+    private IActionResult AssistantUnavailable(GeminiException ex, string locale)
+    {
+        var isEnglish = locale.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+        var missingKey = ex.Code == GeminiException.ApiKeyMissing;
+        var code = missingKey ? GeminiException.ApiKeyMissing : "AI_UNAVAILABLE";
+        var reason = ex.Code switch
+        {
+            GeminiException.Timeout => "timeout",
+            GeminiException.Busy => "busy",
+            GeminiException.Unavailable => "unavailable",
+            GeminiException.ApiKeyMissing => "not_configured",
+            _ => "error",
+        };
+        var retryable = !missingKey;
+        var message = missingKey
+            ? (isEnglish
+                ? "The assistant is not configured right now. Your message was not sent; you can ask to speak with administration."
+                : "El asistente no está configurado en este momento. Tu mensaje no se envió; puedes pedir hablar con administración.")
+            : (isEnglish
+                ? "The assistant is unavailable right now. Your message was not sent; please try again in a few seconds."
+                : "El asistente no está disponible en este momento. Tu mensaje no se envió; vuelve a intentarlo en unos segundos.");
+
+        Response.Headers.RetryAfter = "5";
+        return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+        {
+            code,
+            reason,
+            retryable,
+            message,
+        });
+    }
+
+    private static string BasicSystemPrompt(string locale) =>
+        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
+            ? "You are the BuildingFex assistant for the residents of a condominium. Reply in English, briefly and clearly."
+            : "Eres el asistente de BuildingFex para los residentes de un condominio. Responde en español, de forma breve y clara.";
+
+    private static string EmptyReplyMessage(string locale) =>
+        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
+            ? "I couldn't generate an answer. Please rephrase your question."
+            : "No pude generar una respuesta. Reformula tu pregunta, por favor.";
+
+    private async Task TrySummarizeTitleAsync(SupportChat chat, Actor actor, string locale, CancellationToken ct)
+    {
+        if (chat.TitleSummarized) return;
+
+        var dialogueCount = chat.Messages.Count(m =>
+            SenderRoles.FromAuthorRole(m.AuthorRole) is Sender.Resident or Sender.Assistant);
+        if (dialogueCount < 2) return;
+
+        var turns = chat.Messages
+            .OrderBy(m => m.CreatedAt)
+            .ThenBy(m => m.Id)
+            .Select(m => new GeminiTurn(m.AuthorRole, m.Body))
+            .ToList();
+
+        // Accesorio: no debe alargar el turno del residente; sus fallos no cuentan para el breaker.
+        using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budgetCts.CancelAfter(TitleSummaryBudget);
+        try
+        {
+            var title = await gemini.SummarizeTitleAsync(turns, locale, budgetCts.Token);
+            if (!string.IsNullOrWhiteSpace(title))
+                chat.SetTopic(title, summarized: true);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Title summarize skipped");
+        }
     }
 
     private static void AddResidentMessage(SupportChat chat, Actor actor, string body, DateTimeOffset askedAt)
