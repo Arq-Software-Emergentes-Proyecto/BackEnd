@@ -45,7 +45,6 @@ public class SupportController(
 {
     private const int MaxMessageLength = 2000;
     private const int MaxHistoryTurns = 20;
-    private static readonly TimeSpan TitleSummaryBudget = TimeSpan.FromSeconds(3);
 
     [HttpGet("chats")]
     public async Task<IActionResult> List(
@@ -116,7 +115,7 @@ public class SupportController(
         });
     }
 
-    /// <summary>US041 / CON11: consumo del tope mensual de consultas al asistente.</summary>
+    /// <summary>CON11: consumo del tope mensual de consultas al asistente del edificio.</summary>
     [HttpGet("ai-usage")]
     [Authorize(Policy = AuthorizationPolicies.AdminOnly)]
     public async Task<IActionResult> AiUsage(CancellationToken ct)
@@ -125,7 +124,7 @@ public class SupportController(
         if (actor is null) return error!;
 
         var tenantAdmin = actor.Caller.TenantAdmin;
-        // Portafolio: el tope es de toda la cuenta (todos sus edificios).
+        // Portafolio: el tope de consultas es de toda la cuenta (todos sus edificios).
         var usage = await aiQuota.GetAsync(
             actor.Caller.BillingAdmin.ExternalId,
             planQuota.MonthlyAiQueryCap(tenantAdmin.SubscriptionPlanId, tenantAdmin.SubscriptionPaidUntil),
@@ -135,9 +134,9 @@ public class SupportController(
             period = usage.Period,
             used = usage.Used,
             cap = usage.Cap,
-            remaining = usage.Remaining,
             filtered = usage.Filtered,
             residentDailyLimit = AnswerPolicy.ResidentDailyAiQueries,
+            remaining = usage.Remaining,
             capReached = usage.CapReached,
             planId = tenantAdmin.SubscriptionPlanId,
             effectivePlanId = BuildingFex.Api.Billing.Domain.Model.SubscriptionPlans.EffectivePlanId(
@@ -403,8 +402,10 @@ public class SupportController(
     }
 
     /// <summary>
-    /// Turno en el chat con el asistente. El mensaje del residente solo se guarda si hubo respuesta;
-    /// ante una falla del proveedor se responde 503 y se puede reintentar sin duplicar.
+    /// AskQuestion (informe 5.9.3): verifica el tope del plan, recupera fragmentos del edificio,
+    /// aplica AnswerPolicy y responde con la fuente citada o deriva a la junta / administración.
+    /// El mensaje del residente solo se guarda si hubo respuesta o derivación: ante una falla del
+    /// proveedor se responde 503 y el cliente puede reintentar sin duplicar el mensaje.
     /// </summary>
     private async Task<IActionResult> HandleAiThreadMessageAsync(
         Actor actor,
@@ -413,7 +414,6 @@ public class SupportController(
         string locale,
         CancellationToken ct)
     {
-        // TS010: defensa en profundidad (además de CanAccess): solo el residente dueño habla con el asistente.
         if (actor.IsAdmin || !string.Equals(chat.ResidentId, actor.ExternalId, StringComparison.Ordinal))
             return ForbiddenTenant(actor.Caller, "chatId", chat.ExternalId);
 
@@ -434,7 +434,6 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
-        // US044: si el residente pide a una persona, se deriva sin llamar a la IA.
         if (SupportEscalate.ResidentWantsAdmin(body))
         {
             AddResidentMessage(chat, actor, body, askedAt);
@@ -443,7 +442,6 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
-        // US044: las emergencias no las resuelve la IA; se orienta y se deriva.
         if (AnswerPolicy.IsEmergency(body))
         {
             AddResidentMessage(chat, actor, body, askedAt);
@@ -453,25 +451,24 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
-        // US045: saludos y temas ajenos se responden sin IA, sin gastar el tope ni derivar.
+        // Filtro de relevancia (CON11): saludos, temas ajenos y mensajes sin contenido se responden sin IA y no
+        // consumen el tope del plan ni se derivan a la administración.
         var scope = QuestionRelevancePolicy.Classify(body);
         if (scope != QuestionScope.Building)
         {
-            var fixedReply = scope switch
+            AddResidentMessage(chat, actor, body, askedAt);
+            chat.AddMessage(Sender.Assistant, scope switch
             {
-                QuestionScope.SmallTalk => QuestionRelevancePolicy.SmallTalkMessage(locale, body),
+                QuestionScope.SmallTalk => QuestionRelevancePolicy.SmallTalkMessage(body, locale),
                 QuestionScope.OffTopic => QuestionRelevancePolicy.OffTopicMessage(locale),
                 _ => QuestionRelevancePolicy.UnclearMessage(locale),
-            };
-            AddResidentMessage(chat, actor, body, askedAt);
-            chat.AddMessage(Sender.Assistant, fixedReply);
+            });
             chat.MarkAnswered();
             await db.SaveChangesAsync(ct);
             await aiQuota.RecordFilteredAsync(actor.Caller.BillingAdmin.ExternalId, ct);
             return await RespondAsync(chat, ct);
         }
 
-        // TS010: tope de llamadas a Gemini por residente; el mensaje no se guarda, así el reintento no duplica.
         if (!rateLimiter.TryAcquire(actor.ExternalId))
         {
             return StatusCode(StatusCodes.Status429TooManyRequests, new
@@ -481,14 +478,14 @@ public class SupportController(
             });
         }
 
-        // US041 / CON11: tope mensual del plan, contado para toda la cuenta (en Portafolio, la matriz).
+        // CON11: tope mensual por edificio. Al alcanzarlo no se usa la IA y se deriva.
         var cap = planQuota.MonthlyAiQueryCap(
             actor.Caller.TenantAdmin.SubscriptionPlanId,
             actor.Caller.TenantAdmin.SubscriptionPaidUntil);
+        // El tope mensual se cuenta por cuenta (en Portafolio, la matriz con todos sus edificios).
         var reservation = await aiQuota.TryConsumeAsync(actor.Caller.BillingAdmin.ExternalId, cap, ct);
         if (reservation is null)
         {
-            // US044: con el tope alcanzado la consulta pasa a la administración; el chat derivado va en el body.
             AddResidentMessage(chat, actor, body, askedAt);
             chat.AddMessage(Sender.Assistant, AnswerPolicy.MonthlyCapReachedMessage(locale));
             Escalate(chat, notice: null);
@@ -507,10 +504,10 @@ public class SupportController(
             });
         }
 
-        // US045: límite diario por residente; si se alcanzó, se devuelve la reserva mensual.
-        var dailyReservation = await aiQuota.TryConsumeResidentDailyAsync(
+        // Límite diario por residente: quien solo prueba el chat no agota las consultas de todo el edificio.
+        var residentReservation = await aiQuota.TryConsumeResidentDailyAsync(
             chat.OwnerAdminId, actor.ExternalId, AnswerPolicy.ResidentDailyAiQueries, ct);
-        if (dailyReservation is null)
+        if (residentReservation is null)
         {
             await aiQuota.ReleaseAsync(reservation, ct);
             AddResidentMessage(chat, actor, body, askedAt);
@@ -520,29 +517,27 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
-        // Si la IA no llega a responder, la consulta reservada se devuelve.
         var consumed = false;
         try
         {
             var retrievalQuery = BuildRetrievalQuery(chat, body);
-            IReadOnlyList<KnowledgeSource> docSources;
+            IReadOnlyList<KnowledgeSource> documents = [];
             try
             {
-                docSources = await contextIndexer.RetrieveAsync(chat.OwnerAdminId, retrievalQuery, topK: 5, ct);
+                documents = await contextIndexer.RetrieveAsync(chat.OwnerAdminId, retrievalQuery, topK: 5, ct);
             }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
+            catch (Exception ragEx) when (!ct.IsCancellationRequested)
             {
-                logger.LogWarning(ex, "RAG retrieve failed");
-                docSources = [];
+                logger.LogWarning(ragEx, "RAG retrieve failed for chat {ChatId}", chat.ExternalId);
             }
 
-            var sources = docSources.Concat(AppUsageGuide.Match(retrievalQuery, locale)).ToList();
+            var sources = documents.Concat(AppUsageGuide.Match(retrievalQuery, locale)).ToList();
 
-            // US044: sin base documental se deriva sin llamar a la IA (no se descuenta del tope).
+            // Sin base documental: se deriva sin llamar a la IA (no se descuenta del tope).
             if (AnswerPolicy.MustDerive(sources))
             {
                 await aiQuota.ReleaseAsync(reservation, ct);
-                await aiQuota.ReleaseResidentDailyAsync(dailyReservation, ct);
+                await aiQuota.ReleaseResidentDailyAsync(residentReservation, ct);
                 consumed = true;
                 AddResidentMessage(chat, actor, body, askedAt);
                 chat.AddMessage(Sender.Assistant, AnswerPolicy.NoDocumentaryBasisMessage(locale));
@@ -552,36 +547,36 @@ public class SupportController(
             }
 
             var history = BuildHistory(chat, body, locale);
-            var prompt = ResidentAssistantPrompt.Build(locale, actor.Name, AnswerPolicy.BuildContext(sources));
+            var systemPrompt = ResidentAssistantPrompt.Build(locale, actor.Name, AnswerPolicy.BuildContext(sources));
 
             string reply;
             try
             {
-                reply = await gemini.GenerateReplyAsync(history, prompt, ct);
+                reply = await gemini.GenerateReplyAsync(history, systemPrompt, ct);
             }
             catch (GeminiException ex)
             {
                 await aiQuota.ReleaseAsync(reservation, ct);
-                await aiQuota.ReleaseResidentDailyAsync(dailyReservation, ct);
+                await aiQuota.ReleaseResidentDailyAsync(residentReservation, ct);
                 consumed = true;
-                logger.LogWarning(ex, "Gemini unavailable ({Code}) for chat {ChatId}", ex.Code, chat.ExternalId);
+                logger.LogWarning(ex, "Gemini failed ({Code}) for chat {ChatId}", ex.Code, chat.ExternalId);
                 return AssistantUnavailable(ex, locale);
             }
 
             consumed = true;
-            AddResidentMessage(chat, actor, body, askedAt);
             var answer = AnswerPolicy.ToAnswer(reply, sources);
-            var hasText = !string.IsNullOrWhiteSpace(answer.Text);
-            var assistantText = hasText ? answer.Text : AnswerPolicy.NoDocumentaryBasisMessage(locale);
+            AddResidentMessage(chat, actor, body, askedAt);
             chat.AddMessage(
                 SenderRoles.Assistant,
-                assistantText,
-                citedDocumentId: hasText && answer.Grounded ? answer.SourceDocumentId : null,
-                citedSource: hasText && answer.Grounded ? answer.SourceName : null);
+                string.IsNullOrWhiteSpace(answer.Text) ? AnswerPolicy.NoDocumentaryBasisMessage(locale) : answer.Text,
+                citedDocumentId: answer.Grounded ? answer.SourceDocumentId : null,
+                citedSource: answer.Grounded ? answer.SourceName : null);
+
             if (answer.MustDerive)
                 Escalate(chat, notice: null);
             else
                 chat.MarkAnswered();
+
             await TrySummarizeTitleAsync(chat, actor, locale, ct);
             await db.SaveChangesAsync(ct);
             return await RespondAsync(chat, ct);
@@ -591,107 +586,38 @@ public class SupportController(
             if (!consumed)
             {
                 await aiQuota.ReleaseAsync(reservation, CancellationToken.None);
-                await aiQuota.ReleaseResidentDailyAsync(dailyReservation, CancellationToken.None);
+                await aiQuota.ReleaseResidentDailyAsync(residentReservation, CancellationToken.None);
             }
 
             throw;
         }
     }
 
-    private static string BuildRetrievalQuery(SupportChat chat, string body)
-    {
-        var previous = chat.Messages
-            .Where(m => SenderRoles.FromAuthorRole(m.AuthorRole) == Sender.Resident)
-            .OrderByDescending(m => m.CreatedAt)
-            .ThenByDescending(m => m.Id)
-            .Select(m => m.Body.Trim())
-            .FirstOrDefault(b => b.Length > 0);
-
-        return string.IsNullOrEmpty(previous) ? body : $"{previous}\n{body}";
-    }
-
-    /// <summary>TS008 / US043: solo los mensajes de esta conversación (del mismo residente), últimos N turnos con su cita.</summary>
-    private static List<GeminiTurn> BuildHistory(SupportChat chat, string body, string locale)
-    {
-        var turns = chat.Messages
-            .Select(m => new { Message = m, Sender = SenderRoles.FromAuthorRole(m.AuthorRole) })
-            .Where(x => x.Sender is Sender.Resident or Sender.Assistant)
-            .OrderBy(x => x.Message.CreatedAt)
-            .ThenBy(x => x.Message.Id)
-            .TakeLast(MaxHistoryTurns)
-            .Select(x => new GeminiTurn(
-                x.Sender == Sender.Assistant ? SenderRoles.Assistant : SenderRoles.ResidentInAiChat,
-                x.Sender == Sender.Assistant
-                    ? AnswerPolicy.WithCitation(x.Message.Body, x.Message.CitedSource, locale)
-                    : x.Message.Body))
-            .ToList();
-
-        turns.Add(new GeminiTurn(SenderRoles.ResidentInAiChat, body));
-        return turns;
-    }
-
     private IActionResult AssistantUnavailable(GeminiException ex, string locale)
     {
-        var isEnglish = locale.StartsWith("en", StringComparison.OrdinalIgnoreCase);
-        var missingKey = ex.Code == GeminiException.ApiKeyMissing;
-        var code = missingKey ? GeminiException.ApiKeyMissing : "AI_UNAVAILABLE";
-        var reason = ex.Code switch
-        {
-            GeminiException.Timeout => "timeout",
-            GeminiException.Busy => "busy",
-            GeminiException.Unavailable => "unavailable",
-            GeminiException.ApiKeyMissing => "not_configured",
-            _ => "error",
-        };
-        var retryable = !missingKey;
-        var message = missingKey
-            ? (isEnglish
-                ? "The assistant is not configured right now. Your message was not sent; you can ask to speak with administration."
-                : "El asistente no está configurado en este momento. Tu mensaje no se envió; puedes pedir hablar con administración.")
-            : (isEnglish
-                ? "The assistant is unavailable right now. Your message was not sent; please try again in a few seconds."
-                : "El asistente no está disponible en este momento. Tu mensaje no se envió; vuelve a intentarlo en unos segundos.");
-
+        var en = locale.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+        var missingKey = ex.Code == "GEMINI_API_KEY_MISSING";
         Response.Headers.RetryAfter = "5";
         return StatusCode(StatusCodes.Status503ServiceUnavailable, new
         {
-            code,
-            reason,
-            retryable,
-            message,
+            code = missingKey ? "GEMINI_API_KEY_MISSING" : "AI_UNAVAILABLE",
+            reason = ex.Code switch
+            {
+                "GEMINI_TIMEOUT" => "timeout",
+                "GEMINI_BUSY" => "busy",
+                "GEMINI_UNAVAILABLE" => "unavailable",
+                "GEMINI_API_KEY_MISSING" => "not_configured",
+                _ => "error",
+            },
+            retryable = !missingKey,
+            message = missingKey
+                ? (en
+                    ? "The assistant is not configured right now. Your message was not sent; you can ask to talk to building admin."
+                    : "El asistente no está configurado en este momento. Tu mensaje no se envió; puedes pedir hablar con administración.")
+                : (en
+                    ? "The assistant is not available right now. Your message was not sent; please try again in a few seconds."
+                    : "El asistente no está disponible en este momento. Tu mensaje no se envió; vuelve a intentarlo en unos segundos."),
         });
-    }
-
-    private async Task TrySummarizeTitleAsync(SupportChat chat, Actor actor, string locale, CancellationToken ct)
-    {
-        if (chat.TitleSummarized) return;
-
-        var dialogueCount = chat.Messages.Count(m =>
-            SenderRoles.FromAuthorRole(m.AuthorRole) is Sender.Resident or Sender.Assistant);
-        if (dialogueCount < 2) return;
-
-        var turns = chat.Messages
-            .OrderBy(m => m.CreatedAt)
-            .ThenBy(m => m.Id)
-            .Select(m => new GeminiTurn(m.AuthorRole, m.Body))
-            .ToList();
-
-        // Accesorio: no debe alargar el turno del residente; sus fallos no cuentan para el breaker.
-        using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        budgetCts.CancelAfter(TitleSummaryBudget);
-        try
-        {
-            // Clave aparte: el título no gasta el cupo de las respuestas al residente.
-            if (!rateLimiter.TryAcquire(actor.ExternalId + ":title")) return;
-
-            var title = await gemini.SummarizeTitleAsync(turns, locale, budgetCts.Token);
-            if (!string.IsNullOrWhiteSpace(title))
-                chat.SetTopic(title, summarized: true);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            logger.LogDebug(ex, "Title summarize skipped");
-        }
     }
 
     private static void AddResidentMessage(SupportChat chat, Actor actor, string body, DateTimeOffset askedAt)
@@ -705,6 +631,60 @@ public class SupportController(
         if (!chat.TitleSummarized && chat.Topic is "Nuevo chat" or "New chat" or "Soporte")
             chat.SetTopic(TruncateTitle(body));
         chat.MarkPending();
+    }
+
+    /// <summary>Recuperación con la pregunta actual y la anterior del mismo chat (preguntas de seguimiento).</summary>
+    private static string BuildRetrievalQuery(SupportChat chat, string body)
+    {
+        var previous = chat.Messages
+            .Where(m => m.GetSender() == Sender.Resident)
+            .OrderByDescending(m => m.CreatedAt)
+            .Select(m => m.Body)
+            .FirstOrDefault();
+        return string.IsNullOrWhiteSpace(previous) ? body : $"{previous}\n{body}";
+    }
+
+    /// <summary>TS008: solo los mensajes de esta conversación (del mismo residente), últimos N turnos.</summary>
+    private static List<GeminiTurn> BuildHistory(SupportChat chat, string body, string locale)
+    {
+        var turns = chat.Messages
+            .Where(m => m.GetSender() is Sender.Resident or Sender.Assistant)
+            .OrderBy(m => m.CreatedAt)
+            .ThenBy(m => m.Id)
+            .Select(m => m.GetSender() == Sender.Assistant
+                ? new GeminiTurn("assistant", AnswerPolicy.WithCitation(m.Body, m.CitedSource, locale))
+                : new GeminiTurn("user", m.Body))
+            .TakeLast(MaxHistoryTurns)
+            .ToList();
+        turns.Add(new GeminiTurn("user", body));
+        return turns;
+    }
+
+    private static readonly TimeSpan TitleSummaryBudget = TimeSpan.FromSeconds(3);
+
+    private async Task TrySummarizeTitleAsync(SupportChat chat, Actor actor, string locale, CancellationToken ct)
+    {
+        if (chat.TitleSummarized || chat.Messages.Count(m => m.GetSender() is Sender.Resident or Sender.Assistant) < 2)
+            return;
+        try
+        {
+            if (!rateLimiter.TryAcquire(actor.ExternalId + ":title")) return;
+            var turns = chat.Messages
+                .OrderBy(m => m.CreatedAt)
+                .Select(m => new GeminiTurn(m.AuthorRole, m.Body))
+                .ToList();
+            // Accesorio a la respuesta: presupuesto corto (no alarga el turno del residente más de ~3 s, QAS05)
+            // y sus fallos no cuentan para el circuit breaker (GeminiClient).
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            budget.CancelAfter(TitleSummaryBudget);
+            var title = await gemini.SummarizeTitleAsync(turns, locale, budget.Token);
+            if (!string.IsNullOrWhiteSpace(title))
+                chat.SetTopic(title, summarized: true);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Title summarize skipped");
+        }
     }
 
     private static string EscalationNotice(string locale) =>

@@ -6,67 +6,58 @@ using Microsoft.Extensions.Options;
 
 namespace BuildingFex.Api.ResidentCare.Application;
 
-/// <summary>Trabajo de indexación compartido por el worker local y la Lambda de jobs (ai-index).</summary>
+/// <summary>
+/// Indexación de un documento de Contexto IA. La usa el worker en background (servidor normal) y la
+/// función de jobs en AWS Lambda (invocación asíncrona por documento + barrido programado).
+/// </summary>
 public class AiContextIndexingJob(
     AppDbContext db,
     IAiContextIndexer indexer,
-    IOptions<GeminiSettings> options,
+    IOptions<GeminiSettings> geminiOptions,
     ILogger<AiContextIndexingJob> logger)
 {
-    public async Task<IReadOnlyList<string>> FindWorkAsync(bool includePending, CancellationToken ct = default)
+    /// <summary>
+    /// Documentos que hay que (re)indexar: confirmados que siguen en "pending" (p. ej. la invocación se perdió)
+    /// y vigentes con chunks de otro modelo de embeddings. Sin API key de Gemini no devuelve nada.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> FindWorkAsync(bool includePending, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(options.Value.ApiKey))
+        if (string.IsNullOrWhiteSpace(geminiOptions.Value.ApiKey))
             return [];
 
         var ids = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-
         if (includePending)
         {
-            var pending = await db.Set<ImportUpload>()
+            ids.AddRange(await db.Set<ImportUpload>()
                 .AsNoTracking()
                 .Where(u => u.UploadStatus == ImportUploadStatus.Confirmed
                             && u.IndexingStatus == ImportIndexingStatus.Pending)
                 .OrderBy(u => u.UploadedAt)
-                .ThenBy(u => u.Id)
-                .Take(50)
                 .Select(u => u.ExternalId)
-                .ToListAsync(ct);
-
-            foreach (var id in pending)
-            {
-                if (seen.Add(id)) ids.Add(id);
-            }
+                .Take(50)
+                .ToListAsync(ct));
         }
 
         try
         {
-            var stale = await indexer.FindUploadsWithStaleEmbeddingsAsync(ct);
-            foreach (var id in stale)
-            {
-                if (seen.Add(id)) ids.Add(id);
-            }
+            ids.AddRange(await indexer.FindUploadsWithStaleEmbeddingsAsync(ct));
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "FindUploadsWithStaleEmbeddings failed");
+            logger.LogWarning(ex, "AI context: stale embedding scan skipped");
         }
 
-        return ids;
+        return ids.Distinct(StringComparer.Ordinal).ToList();
     }
 
-    public async Task ProcessAsync(string uploadExternalId, CancellationToken ct = default)
+    public async Task ProcessAsync(string uploadId, CancellationToken ct)
     {
-        var clean = (uploadExternalId ?? string.Empty).Trim();
-        if (clean.Length == 0) return;
-
         var upload = await db.Set<ImportUpload>()
-            .FirstOrDefaultAsync(u => u.ExternalId == clean || u.Id.ToString() == clean, ct);
+            .FirstOrDefaultAsync(u => u.ExternalId == uploadId, ct);
         if (upload is null) return;
-
         if (upload.UploadStatus != ImportUploadStatus.Confirmed)
         {
-            logger.LogDebug("Skipping indexing for unconfirmed upload {UploadId}", upload.ExternalId);
+            logger.LogInformation("Skip indexing {UploadId}: not confirmed yet", uploadId);
             return;
         }
 
@@ -76,18 +67,25 @@ public class AiContextIndexingJob(
         try
         {
             await indexer.IndexUploadAsync(upload, ct);
-            await db.Entry(upload).ReloadAsync(ct);
+            upload = await db.Set<ImportUpload>()
+                .FirstAsync(u => u.ExternalId == uploadId, ct);
+            // Indexer puede dejar none/failed; solo marcar done si seguía indexing.
             if (upload.IndexingStatus is ImportIndexingStatus.Indexing or ImportIndexingStatus.Pending)
             {
                 upload.SetIndexingStatus(ImportIndexingStatus.Done);
                 await db.SaveChangesAsync(ct);
             }
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (Exception ex)
         {
-            logger.LogWarning(ex, "Indexing failed for {UploadId}", upload.ExternalId);
-            upload.SetIndexingStatus(ImportIndexingStatus.Failed, ex.Message);
-            await db.SaveChangesAsync(ct);
+            logger.LogWarning(ex, "Indexing error {UploadId}", uploadId);
+            upload = await db.Set<ImportUpload>()
+                .FirstOrDefaultAsync(u => u.ExternalId == uploadId, ct);
+            if (upload is not null)
+            {
+                upload.SetIndexingStatus(ImportIndexingStatus.Failed, ex.Message);
+                await db.SaveChangesAsync(ct);
+            }
         }
     }
 }

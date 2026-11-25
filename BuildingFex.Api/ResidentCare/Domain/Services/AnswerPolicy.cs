@@ -5,119 +5,118 @@ using BuildingFex.Api.ResidentCare.Domain.Model.ValueObjects;
 namespace BuildingFex.Api.ResidentCare.Domain.Services;
 
 /// <summary>
-/// Servicio de dominio: el asistente solo responde con fuentes vigentes del mismo edificio o la guía de uso y cita la fuente usada.
-/// Sin fuente, o si la consulta necesita a una persona, deriva a la junta / administración; las emergencias no las resuelve la IA (US044).
+/// Domain service de Resident Care (informe 5.9.1): el asistente solo responde con una fuente vigente
+/// del mismo edificio; si no hay fuente, deriva a la junta / administración. Tampoco decide sobre
+/// emergencias: las deriva sin pasar por la IA.
 /// </summary>
 public static class AnswerPolicy
 {
+    /// <summary>
+    /// Consultas con IA que cada residente puede hacer por día (CON11), además del tope mensual del edificio:
+    /// una sola persona no puede agotar las consultas de todos.
+    /// </summary>
+    public const int ResidentDailyAiQueries = 15;
+
+    private static readonly Regex CitationLine = new(
+        @"^[ \t>*_\-]*(?:fuentes?|sources?)[ \t*_]*:[ \t*_]*(?<src>.+?)[ \t*_.]*$",
+        RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
+
     private static readonly string[] EmergencyPhrases =
     [
         "incendio", "fuga de gas", "olor a gas", "huele a gas", "emergencia", "inundacion", "electrocut",
         "fire in", "gas leak", "smell gas", "smells like gas", "emergency", "flooding",
     ];
 
-    /// <summary>Sin fuente documental relevante → derivar sin inventar.</summary>
+    /// <summary>Sin fuente documental relevante → derivar sin inventar (US033 "Consulta sin base documental").</summary>
     public static bool MustDerive(IReadOnlyCollection<KnowledgeSource> sources) => sources.Count == 0;
 
-    /// <summary>Emergencias (incendio, gas, inundación…): se orienta y se deriva sin pasar por la IA.</summary>
-    public static bool IsEmergency(string? text)
+    /// <summary>Emergencias (incendio, gas, inundación…): no las resuelve la IA; se orienta y se deriva.</summary>
+    public static bool IsEmergency(string text)
     {
         var q = SupportEscalate.Fold(text);
-        return q.Length > 0 && EmergencyPhrases.Any(p => q.Contains(p, StringComparison.Ordinal));
+        return !string.IsNullOrEmpty(q) && EmergencyPhrases.Any(p => q.Contains(p, StringComparison.Ordinal));
     }
 
-    private static readonly Regex CitationLineRegex = new(
-        @"^[\s>*_\-]*(?:fuentes?|sources?)\s*:\s*(.+?)[*_\.\s]*$",
-        RegexOptions.Compiled | RegexOptions.Multiline | RegexOptions.IgnoreCase);
-
-    private static readonly Regex ExtraNewlinesRegex = new(
-        @"\n{3,}",
-        RegexOptions.Compiled);
-
+    /// <summary>Bloque SOURCES del prompt: cada fragmento con su nombre de archivo para que se cite.</summary>
     public static string BuildContext(IReadOnlyList<KnowledgeSource> sources)
     {
         if (sources.Count == 0) return string.Empty;
-
         var sb = new StringBuilder();
-        foreach (var source in sources)
+        foreach (var s in sources)
         {
-            sb.Append("--- source: ").Append(source.FileName).AppendLine(" ---");
-            sb.AppendLine(source.Content);
+            sb.AppendLine($"--- source: {s.FileName} ---");
+            sb.AppendLine(s.Content.Trim());
             sb.AppendLine();
         }
-        return sb.ToString().TrimEnd();
+
+        return sb.ToString().Trim();
     }
 
+    /// <summary>
+    /// Interpreta la salida del modelo: marcador de derivación, línea "Fuente: …" (se quita del texto y se
+    /// guarda aparte) y la asocia a uno de los fragmentos recuperados. Una fuente que no se recuperó no se acepta.
+    /// </summary>
     public static Answer ToAnswer(string rawReply, IReadOnlyList<KnowledgeSource> sources)
     {
         var derive = SupportEscalate.AssistantWantsEscalate(rawReply);
-        var raw = SupportEscalate.StripEscalateMarker(rawReply);
-        var matches = CitationLineRegex.Matches(raw);
-        var citedRaw = matches.Count > 0 ? CleanCitationName(matches[^1].Groups[1].Value) : null;
+        var text = SupportEscalate.StripEscalateMarker(rawReply);
 
-        var withoutCitations = CitationLineRegex.Replace(raw, string.Empty).Replace("\r\n", "\n");
-        var cleanText = ExtraNewlinesRegex.Replace(withoutCitations, "\n\n").Trim();
+        string? cited = null;
+        var matches = CitationLine.Matches(text);
+        if (matches.Count > 0)
+        {
+            cited = matches[^1].Groups["src"].Value.Trim().Trim('"', '\'', '«', '»', '`');
+            text = CitationLine.Replace(text, string.Empty);
+            text = Regex.Replace(text, @"\n{3,}", "\n\n").Trim();
+        }
 
-        // Si el modelo deriva, la respuesta no se presenta como respaldada por un documento.
-        if (sources.Count == 0 || derive)
-            return new Answer(cleanText, null, null, Grounded: false, MustDerive: derive);
+        var source = MatchSource(cited, sources);
+        if (source is null && !derive && sources.Count > 0)
+            source = sources[0];
 
-        var matched = MatchSource(citedRaw, sources) ?? sources[0];
-        return new Answer(cleanText, matched.DocumentId, matched.FileName, Grounded: true);
+        return new Answer(
+            text,
+            source?.DocumentId,
+            source?.FileName,
+            Grounded: source is not null && !derive,
+            MustDerive: derive);
     }
 
+    /// <summary>Texto del asistente con su cita, para reenviar el historial al modelo.</summary>
     public static string WithCitation(string body, string? citedSource, string locale)
     {
         if (string.IsNullOrWhiteSpace(citedSource)) return body;
         var label = locale.StartsWith("en", StringComparison.OrdinalIgnoreCase) ? "Source" : "Fuente";
-        return $"{body}\n{label}: {citedSource.Trim()}";
+        return $"{body}\n{label}: {citedSource}";
     }
 
-    public static string NoDocumentaryBasisMessage(string locale) =>
-        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
-            ? "I couldn't find a documentary basis in your building's current bylaws or meeting minutes to answer this, so I can't reply without guessing. I've passed your question to the board / building administration; they will reply in this same chat."
-            : "No encontré una base documental en el reglamento ni en las actas vigentes de tu edificio para responder esto, así que no puedo contestarte sin adivinar. Derivé tu consulta a la junta / administración; te responderán en este mismo chat.";
+    public static string NoDocumentaryBasisMessage(string locale) => IsEnglish(locale)
+        ? "I couldn't find anything about this in your building's current rules or meeting minutes, so I can't answer it without guessing. I've passed your question to the board / building administration; they will reply in this same chat."
+        : "No encontré una base documental en el reglamento ni en las actas vigentes de tu edificio para responder esto, así que no puedo contestarte sin adivinar. Derivé tu consulta a la junta / administración; te responderán en este mismo chat.";
 
-    public static string MonthlyCapReachedMessage(string locale) =>
-        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
-            ? "Your building has reached this month's assistant query limit for its plan, so I can't use AI to answer. I've passed your question to the board / building administration; they will reply in this same chat."
-            : "Tu edificio alcanzó el tope mensual de consultas al asistente de su plan, así que no puedo usar la IA para responder. Derivé tu consulta a la junta / administración; te responderán en este mismo chat.";
+    public static string MonthlyCapReachedMessage(string locale) => IsEnglish(locale)
+        ? "Your building has reached this month's assistant query limit for its plan, so I can't use AI to answer. I've passed your question to the board / building administration; they will reply in this same chat."
+        : "Tu edificio alcanzó el tope mensual de consultas al asistente de su plan, así que no puedo usar la IA para responder. Derivé tu consulta a la junta / administración; te responderán en este mismo chat.";
 
-    /// <summary>US045: tope diario de consultas a la IA por residente.</summary>
-    public const int ResidentDailyAiQueries = 15;
+    public static string ResidentDailyLimitMessage(string locale, int limit) => IsEnglish(locale)
+        ? $"You've reached today's limit of {limit} assistant questions. You can ask again tomorrow; if it's urgent, ask to talk to the building administration."
+        : $"Llegaste al límite de {limit} consultas al asistente por hoy. Podrás volver a preguntar mañana; si es urgente, pide hablar con la administración.";
 
-    public static string ResidentDailyLimitMessage(string locale, int limit) =>
-        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
-            ? $"You've reached today's limit of {limit} assistant queries. Come back tomorrow; if it's urgent, please contact the building administration directly."
-            : $"Llegaste al límite de {limit} consultas al asistente por hoy. Vuelve mañana; si es urgente, comunícate directamente con la administración del edificio.";
+    public static string EmergencyMessage(string locale) => IsEnglish(locale)
+        ? "If this is an emergency, call emergency services now (Peru: firefighters 116, police 105, SAMU 106) and alert the building staff. I've also passed your message to the building administration."
+        : "Si es una emergencia, llama ahora a los servicios de emergencia (Bomberos 116, Policía 105, SAMU 106) y avisa al personal del edificio. También derivé tu mensaje a la administración.";
 
-    public static string EmergencyMessage(string locale) =>
-        locale.StartsWith("en", StringComparison.OrdinalIgnoreCase)
-            ? "If this is an emergency, call emergency services now (Peru: firefighters 116, police 105, SAMU 106) and alert the building staff. I've also passed your message to the building administration."
-            : "Si es una emergencia, llama ahora a los servicios de emergencia (Bomberos 116, Policía 105, SAMU 106) y avisa al personal del edificio. También derivé tu mensaje a la administración.";
-
-    private static string? CleanCitationName(string raw)
+    private static KnowledgeSource? MatchSource(string? cited, IReadOnlyList<KnowledgeSource> sources)
     {
-        var clean = raw.Trim().Trim('"', '\'', '«', '»', '`', '*', '_', '.', ' ');
-        return clean.Length == 0 ? null : clean;
-    }
-
-    private static KnowledgeSource? MatchSource(string? citedName, IReadOnlyList<KnowledgeSource> sources)
-    {
-        if (string.IsNullOrWhiteSpace(citedName)) return null;
-        var foldedCited = SupportEscalate.Fold(citedName);
-        if (foldedCited.Length == 0) return null;
-
-        foreach (var source in sources)
+        if (string.IsNullOrWhiteSpace(cited) || sources.Count == 0) return null;
+        var c = SupportEscalate.Fold(cited);
+        return sources.FirstOrDefault(s =>
         {
-            var foldedSource = SupportEscalate.Fold(source.FileName);
-            if (foldedSource.Length == 0) continue;
-            if (foldedSource.Contains(foldedCited, StringComparison.Ordinal)
-                || foldedCited.Contains(foldedSource, StringComparison.Ordinal))
-            {
-                return source;
-            }
-        }
-        return null;
+            var f = SupportEscalate.Fold(s.FileName);
+            return f.Length > 0 && (c.Contains(f, StringComparison.Ordinal) || f.Contains(c, StringComparison.Ordinal));
+        });
     }
+
+    private static bool IsEnglish(string locale) =>
+        (locale ?? string.Empty).StartsWith("en", StringComparison.OrdinalIgnoreCase);
 }

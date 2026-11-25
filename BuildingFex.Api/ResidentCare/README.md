@@ -22,47 +22,28 @@ Namespace raíz: `BuildingFex.Api.ResidentCare`. Las clases `SupportChat`, `Supp
 - SignalR: `?access_token=`
 - AuthZ: admin solo su `ownerAdminId`; residente solo sus chats
 
+## Contexto IA (RAG)
+
+1. En Importación (Communications) aparece la carpeta fija **Contexto IA** (no se borra).
+2. Sube `.txt`, `.md`, `.csv`, `.json` o `.pdf` ahí.
+3. El servidor extrae texto → chunks → embeddings Gemini (`gemini-embedding-001`, 768 dims; los chunks indexados con `text-embedding-004` deben re-subirse para re-indexar) → tabla `ai_context_chunks`.
+4. En soporte, el asistente recupera los chunks del edificio con similitud ≥ `Gemini:MinRelevanceScore` (o keyword si falla el embedding) + secciones de la guía de uso (`Domain/Services/AppUsageGuide.cs`). Sin fuentes → deriva sin llamar a la IA (`AnswerPolicy`). Con fuentes → responde citando `Fuente: <archivo>` (se guarda en `support_messages.cited_document_id/cited_source`).
+
+**Tu config:** misma `GEMINI_API_KEY` / `Gemini:ApiKey` que ya usas. En Railway añade la variable si falta.
+
 ## Estados (US032)
 
 `support_chats.status`: `open` (pendiente) · `answered` (atendido) · `derived` (chat IA derivado) · `closed`.
 Admin responde → `answered`; residente escribe → `open`. Endpoints: `PATCH /api/v1/support/chats/{id}/status` (admin, body `{ status }`),
 `PATCH /api/v1/support/chats/{id}/close`, `GET /api/v1/support/chats/summary` (contadores), `GET /api/v1/support/chats?status=pending|answered|closed`.
 
-## Resiliencia (QAS05)
-
-El cliente de Gemini (`ResidentCare/Infrastructure/Gemini/GeminiClient.cs`) protege al chat cuando el proveedor falla:
-
-- **Timeout** por llamada (`Gemini:TimeoutSeconds`, entre 1 y 120 s).
-- **Reintento**: 1 vez, tras ~400 ms, ante 429/503.
-- **Modelos alternativos**: si el modelo responde 404 se prueban `Gemini:FallbackModels` y se recuerda el que funcionó.
-- **Circuit breaker**: tras `CircuitBreakerFailures` fallos seguidos (>=500 o timeout) se abre `CircuitBreakerOpenSeconds` y falla rápido sin llamar. El resumen de título es accesorio: sus fallos no cuentan.
-- Los errores salen como `GeminiException` con códigos estables (`GEMINI_API_KEY_MISSING`, `GEMINI_EMPTY_PROMPT`, `GEMINI_UNAVAILABLE`, `GEMINI_TIMEOUT`, `GEMINI_REQUEST_FAILED`, `GEMINI_EMPTY_REPLY`, `GEMINI_BUSY`).
-- La API devuelve **503 `AI_UNAVAILABLE`** (o `GEMINI_API_KEY_MISSING`) **sin guardar el mensaje**, para que el cliente reintente sin duplicar.
-
-Configuración: `GEMINI_API_KEY` (o `Gemini__ApiKey`) y opcional `GEMINI_MODEL`. En local, en `appsettings.Local.json`; nunca en un commit.
-
 ## Tope mensual (CON11)
 
-Tabla `ai_usages` (owner_admin_id, period `yyyy-MM` en hora de Lima, query_count; única por owner + period). Cada respuesta de la IA
-consume 1 con un UPDATE condicional atómico; si al final no se usa la IA (falla del proveedor) se devuelve. Tope =
-`SubscriptionPlans.MonthlyAiQueryCap` del plan efectivo; en Portafolio se cuenta para toda la cuenta. Al alcanzarlo: 429
-`AI_MONTHLY_CAP_REACHED` y la consulta se deriva a la administración (`chat` derivado en el body). Consumo para el admin:
-`GET /api/v1/support/ai-usage`.
+Tabla `ai_usages` (owner_admin_id, period yyyy-MM hora Lima, query_count; único por owner+period). Cada respuesta de la IA consume 1
+(UPDATE condicional atómico); si no se llega a usar la IA (sin fuentes, error del proveedor) se devuelve. Tope = `SubscriptionPlans.MonthlyAiQueryCap(plan)`.
+Al alcanzarlo: 429 `AI_MONTHLY_CAP_REACHED` + derivación al chat admin (`chat` en el body). `GET /api/v1/support/ai-usage` (admin).
 
-## Derivación a la administración (US044)
+## Resiliencia (QAS05)
 
-El chat IA se deriva (fila `kind=admin` ligada por `linked_chat_id`) cuando:
-1. el residente lo pide ("pásame con el administrador", "hablar con la junta"…): sin IA;
-2. es una emergencia (incendio, gas, inundación…): mensaje con los números de emergencia y derivación, sin IA;
-3. no hay base documental: sin IA y sin descontar del tope;
-4. el edificio alcanzó el tope mensual;
-5. el modelo responde con `[[ESCALATE_ADMIN]]` en la última línea (el marcador se quita del texto).
-
-## Contexto IA (RAG)
-
-1. La carpeta fija **Contexto IA** (`isContext: true`) no puede eliminarse (`CONTEXT_FOLDER_PROTECTED`) y sus documentos vigentes alimentan al asistente.
-2. Formatos indexables: `.txt`, `.md`, `.csv`, `.json` y `.pdf` (extracción de texto por página con PdfPig).
-3. Pipeline de indexación: texto → chunks de hasta 900 caracteres (solape 120) → embeddings `gemini-embedding-001` de 768 dims → tabla `ai_context_chunks`.
-4. Recuperación por edificio (`ownerAdminId`) sobre documentos `PUBLISHED` usando similitud coseno (`≥ Gemini:MinRelevanceScore`) o respaldo por palabras clave, más la guía de uso de BuildingFex. Con fuentes responde citando `Fuente: <archivo>`, que se guarda en `support_messages.cited_document_id` / `cited_source`.
-
-Configuración de embeddings: misma `GEMINI_API_KEY` / `Gemini:ApiKey` (opcional `Gemini:EmbeddingModel`, `Gemini:EmbeddingDimensions`, `Gemini:MinRelevanceScore`).
+`Gemini:TimeoutSeconds` (3 s por llamada), 1 reintento con backoff ante 429/503, circuit breaker (`CircuitBreakerFailures`/`OpenSeconds`).
+Fallas → 503 `AI_UNAVAILABLE` (o `GEMINI_API_KEY_MISSING`) sin guardar el mensaje: el cliente reintenta sin duplicar.
