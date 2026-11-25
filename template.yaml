@@ -204,6 +204,23 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmTopic]
 
+  JobsErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: La función de jobs tuvo al menos un error en la última hora.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref JobsFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
   FailedJobsQueueAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -230,7 +247,7 @@ Resources:
   JobsFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Description: BuildingFex jobs (migrate, monthly-billing, import-cleanup, ai-index)
+      Description: BuildingFex jobs (migrate, monthly-billing, import-cleanup, ai-index, incident-escalation)
       Timeout: 600
       Environment:
         Variables:
@@ -240,6 +257,11 @@ Resources:
             BucketName: !Ref FilesBucket
       EventInvokeConfig:
         MaximumRetryAttempts: 1
+        # Invocaciones asíncronas que fallan tras el reintento (p. ej. indexar un documento) van a la cola (TS019).
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt FailedJobsQueue.Arn
       Events:
         MonthlyBilling:
           Type: ScheduleV2
@@ -247,21 +269,37 @@ Resources:
             ScheduleExpression: "cron(15 6 * * ? *)"
             ScheduleExpressionTimezone: !Ref ScheduleTimezone
             Input: '{"job":"monthly-billing"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
         ImportCleanup:
           Type: ScheduleV2
           Properties:
             ScheduleExpression: "rate(30 minutes)"
             Input: '{"job":"import-cleanup"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
         AiIndexSweep:
           Type: ScheduleV2
           Properties:
             ScheduleExpression: "rate(30 minutes)"
             Input: '{"job":"ai-index"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
         IncidentEscalation:
           Type: ScheduleV2
           Properties:
             ScheduleExpression: rate(1 hour)
             Input: '{"job":"incident-escalation"}'
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+            DeadLetterConfig:
+              Arn: !GetAtt FailedJobsQueue.Arn
 
   JobsLogGroup:
     Type: AWS::Logs::LogGroup
