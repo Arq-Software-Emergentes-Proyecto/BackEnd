@@ -179,6 +179,22 @@ public static class SchemaUpgrade
             );
             """, ct);
 
+        // ResidentCare (US045): mensajes filtrados sin IA y contador diario de consultas por residente.
+        await EnsureColumnAsync(db, logger, "ai_usages", "filtered_count", "INT NOT NULL DEFAULT 0", ct);
+        await EnsureTableAsync(db, logger, """
+            CREATE TABLE IF NOT EXISTS resident_ai_usages (
+              id INT NOT NULL AUTO_INCREMENT,
+              owner_admin_id VARCHAR(128) NOT NULL,
+              resident_id VARCHAR(128) NOT NULL,
+              `day` VARCHAR(10) NOT NULL,
+              query_count INT NOT NULL DEFAULT 0,
+              created_at DATETIME(6) NOT NULL,
+              updated_at DATETIME(6) NOT NULL,
+              PRIMARY KEY (id),
+              UNIQUE KEY ix_resident_ai_usages_owner_resident_day (owner_admin_id, resident_id, `day`)
+            );
+            """, ct);
+
         // IAM: cuentas de edificio del plan Portafolio, tipo de cuenta (administración o junta) y miembros.
         await EnsureColumnAsync(db, logger, "users", "parent_admin_id", "INT NULL", ct);
         await EnsureColumnAsync(db, logger, "users", "account_kind", "VARCHAR(20) NULL", ct);
