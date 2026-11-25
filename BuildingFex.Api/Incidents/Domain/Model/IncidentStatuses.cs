@@ -69,6 +69,7 @@ public static class IncidentEventTypes
     public const string Resolved = "resolved";
     public const string Comment = "comment";
     public const string AiTriageSuggested = "ai_triage_suggested";
+    public const string TriageConfirmed = "triage_confirmed";
 }
 
 /// <summary>

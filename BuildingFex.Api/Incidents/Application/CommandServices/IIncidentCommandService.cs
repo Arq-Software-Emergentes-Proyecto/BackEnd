@@ -11,5 +11,6 @@ public interface IIncidentCommandService
     Task<Result<Incident>> Handle(AssignIncidentCommand command, CancellationToken cancellationToken = default);
     Task<Result<Incident>> Handle(ResolveIncidentCommand command, CancellationToken cancellationToken = default);
     Task<Result<Incident>> Handle(AddIncidentCommentCommand command, CancellationToken cancellationToken = default);
+    Task<Result<Incident>> Handle(ConfirmIncidentTriageCommand command, CancellationToken cancellationToken = default);
     Task<Result<Incident>> Handle(DeleteIncidentCommand command, CancellationToken cancellationToken = default);
 }

@@ -21,6 +21,7 @@ También expuestos en `/api/v1/incidents` (diseño táctico).
 | PATCH | `/incidents/{id}/resolve` | admin; `{ resolutionComment }` obligatorio → `RESOLUTION_COMMENT_REQUIRED` (400) |
 | POST | `/incidents/{id}/comments` | admin o residente que reportó; comentario de seguimiento |
 | POST | `/incidents/{id}/triage-suggestion` | admin; la IA sugiere `category` y `priority` (plan Standard+) → 403 `PLAN_FEATURE_NOT_INCLUDED`, 429 `AI_MONTHLY_CAP_REACHED`, 503 `AI_UNAVAILABLE` |
+| PATCH | `/incidents/{id}/triage` | admin; `{}` aplica la sugerencia, `{ category?, priority? }` la corrige → `TRIAGE_SUGGESTION_REQUIRED` (400) |
 | DELETE | `/incidents/{id}` | admin |
 
 Tiempo real: reutiliza `SupportHub` (`/hubs/support`). `incidentCreated` → grupo del admin;
@@ -44,7 +45,7 @@ falla. El residente no ve la sugerencia.
 
 Prioridad opcional: `low` / `medium` / `high` / `critical`. Historial en `incident_events`
 (`reported`, `status_changed`, `assigned`, `unassigned`, `resolved`, `comment`,
-`ai_triage_suggested`).
+`ai_triage_suggested`, `triage_confirmed`).
 
 ## Fase 3 — completado
 

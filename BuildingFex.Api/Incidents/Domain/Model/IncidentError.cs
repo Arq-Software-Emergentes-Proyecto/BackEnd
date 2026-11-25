@@ -12,6 +12,7 @@ public enum IncidentError
     ResolutionCommentRequired,
     CommentRequired,
     ProviderNotFound,
+    TriageSuggestionRequired,
 }
 
 /// <summary>Violación de una regla de negocio del agregado Incident.</summary>

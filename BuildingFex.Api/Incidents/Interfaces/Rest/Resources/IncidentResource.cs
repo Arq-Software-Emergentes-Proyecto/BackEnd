@@ -78,3 +78,6 @@ public record AssignIncidentResource(string? ProviderId, string? Provider, strin
 public record ResolveIncidentResource(string? ResolutionComment, string? Comment);
 
 public record AddIncidentCommentResource(string? Comment);
+
+/// <summary>PATCH /incidents/{id}/triage: valores vacíos = aplicar la sugerencia de la IA.</summary>
+public record ConfirmIncidentTriageResource(string? Category, string? Priority);

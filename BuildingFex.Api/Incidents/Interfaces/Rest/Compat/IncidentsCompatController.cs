@@ -23,8 +23,8 @@ namespace BuildingFex.Api.Incidents.Interfaces.Rest.Compat;
 /// Incidencias (compat json-server + endpoints del diseño táctico: PATCH assign / resolve).
 /// Tiempo real: reutiliza SupportHub (/hubs/support) — "incidentCreated" al grupo del admin
 /// y "incidentUpdated" al admin y al residente que reportó.
-/// Triaje con IA (plan Standard+): sugerencia automática al reportar y POST {id}/triage-suggestion para pedirla
-/// de nuevo.
+/// Triaje con IA (plan Standard+): sugerencia automática al reportar, POST {id}/triage-suggestion para pedirla
+/// de nuevo y PATCH {id}/triage para que el administrador la confirme o corrija.
 /// </summary>
 [ApiController]
 [Route("incidents")]
@@ -181,6 +181,27 @@ public class IncidentsCompatController(
                 message = "La IA no está disponible en este momento. Intenta de nuevo o clasifica manualmente.",
             }),
         };
+    }
+
+    /// <summary>El administrador confirma la sugerencia de la IA (cuerpo vacío) o la corrige (category / priority).</summary>
+    [HttpPatch("{id}/triage")]
+    [Authorize(Policy = AuthorizationPolicies.AdminOnly)]
+    public async Task<IActionResult> ConfirmTriage(
+        string id,
+        [FromBody] ConfirmIncidentTriageResource? resource,
+        CancellationToken ct)
+    {
+        var (caller, error) = await ResolveTenantAsync(null, ct);
+        if (error is not null) return error;
+
+        var (_, accessError) = await FindAccessibleAsync(caller!, id, ct);
+        if (accessError is not null) return accessError;
+
+        var result = await incidentCommandService.Handle(
+            new ConfirmIncidentTriageCommand(id, resource?.Category, resource?.Priority, Actor(caller!)),
+            ct);
+
+        return await UpdatedResponseAsync(caller!, result, ct);
     }
 
     [HttpPut("{id}")]
@@ -404,6 +425,7 @@ public class IncidentsCompatController(
             IncidentError.ResolutionCommentRequired => "RESOLUTION_COMMENT_REQUIRED",
             IncidentError.CommentRequired => "COMMENT_REQUIRED",
             IncidentError.ProviderNotFound => "PROVIDER_NOT_FOUND",
+            IncidentError.TriageSuggestionRequired => "TRIAGE_SUGGESTION_REQUIRED",
             _ => "INCIDENT_ERROR",
         };
 }

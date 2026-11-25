@@ -265,6 +265,28 @@ public class Incident : IAuditableEntity
         Touch();
     }
 
+    /// <summary>
+    /// El administrador confirma la clasificación. Sin valores explícitos se toma la sugerencia de la IA.
+    /// </summary>
+    public void ConfirmTriage(string? category, string? priority, IncidentActor actor)
+    {
+        var cat = string.IsNullOrWhiteSpace(category) ? AiSuggestedCategory : Clip(category, CategoryMaxLength);
+        var pri = IncidentPriorities.Normalize(priority) ?? AiSuggestedPriority;
+        if (cat is null && pri is null)
+            throw new IncidentDomainException(
+                IncidentError.TriageSuggestionRequired,
+                "No hay una sugerencia de triaje para confirmar.");
+
+        Category = cat ?? Category;
+        Priority = pri ?? Priority;
+        _events.Add(IncidentEvent.Create(
+            IncidentEventTypes.TriageConfirmed,
+            Status,
+            TriageSummary(Category, Priority),
+            actor));
+        Touch();
+    }
+
     private static string TriageSummary(string? category, string? priority)
     {
         var parts = new List<string>();
