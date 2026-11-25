@@ -10,6 +10,7 @@ using BuildingFex.Api.ResidentCare.Domain;
 using BuildingFex.Api.ResidentCare.Domain.Model.Aggregates;
 using BuildingFex.Api.ResidentCare.Domain.Model.ValueObjects;
 using BuildingFex.Api.ResidentCare.Infrastructure.Gemini;
+using BuildingFex.Api.ResidentCare.Infrastructure.RateLimiting;
 using BuildingFex.Api.ResidentCare.Interfaces.Hubs;
 using BuildingFex.Api.Shared.Infrastructure.Persistence.EntityFrameworkCore.Configuration;
 using BuildingFex.Api.Shared.Interfaces.Rest;
@@ -31,6 +32,7 @@ namespace BuildingFex.Api.ResidentCare.Interfaces.Rest;
 public class SupportController(
     AppDbContext db,
     IGeminiClient gemini,
+    GeminiRateLimiter rateLimiter,
     IHubContext<SupportHub> hub,
     IIncidentCommandService incidentCommands,
     ILogger<SupportController> logger) : TenantScopedControllerBase
@@ -394,6 +396,16 @@ public class SupportController(
             return await RespondAsync(chat, ct);
         }
 
+        // TS010: tope de llamadas a Gemini por residente; el mensaje no se guarda, así el reintento no duplica.
+        if (!rateLimiter.TryAcquire(actor.ExternalId))
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                code = "GEMINI_RATE_LIMITED",
+                message = "Demasiadas solicitudes al asistente. Espera un momento.",
+            });
+        }
+
         var history = BuildHistory(chat, body);
         var prompt = ResidentAssistantPrompt.Build(locale, actor.Name);
 
@@ -491,6 +503,9 @@ public class SupportController(
         budgetCts.CancelAfter(TitleSummaryBudget);
         try
         {
+            // Clave aparte: el título no gasta el cupo de las respuestas al residente.
+            if (!rateLimiter.TryAcquire(actor.ExternalId + ":title")) return;
+
             var title = await gemini.SummarizeTitleAsync(turns, locale, budgetCts.Token);
             if (!string.IsNullOrWhiteSpace(title))
                 chat.SetTopic(title, summarized: true);
